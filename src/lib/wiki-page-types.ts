@@ -8,6 +8,13 @@ export const GENERATION_WIKI_TYPES = [
   "thesis",
   "methodology",
   "finding",
+  "company",
+  "analysis",
+  "claim",
+  "market",
+  "product",
+  "technology",
+  "person",
 ] as const
 
 const WIKI_TYPE_DIRS: Array<{ dir: string; type: string }> = [
@@ -20,6 +27,13 @@ const WIKI_TYPE_DIRS: Array<{ dir: string; type: string }> = [
   { dir: "findings", type: "finding" },
   { dir: "thesis", type: "thesis" },
   { dir: "methodology", type: "methodology" },
+  { dir: "companies", type: "company" },
+  { dir: "analyses", type: "analysis" },
+  { dir: "claims", type: "claim" },
+  { dir: "markets", type: "market" },
+  { dir: "products", type: "product" },
+  { dir: "technologies", type: "technology" },
+  { dir: "people", type: "person" },
 ]
 
 export function inferWikiTypeFromPath(path: string, fileName?: string): string | null {

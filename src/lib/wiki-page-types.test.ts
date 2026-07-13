@@ -23,8 +23,8 @@ describe("inferWikiTypeFromPath", () => {
   })
 
   it("uses custom wiki subdirectories as dynamic types", () => {
-    expect(inferWikiTypeFromPath("/project/wiki/people/ada-lovelace.md")).toBe("people")
-    expect(inferWikiTypeFromPath("/project/wiki/technologies/vector-db.md")).toBe("technologies")
+    expect(inferWikiTypeFromPath("/project/wiki/interviews/ada-lovelace.md")).toBe("interviews")
+    expect(inferWikiTypeFromPath("/project/wiki/patents/us-12345.md")).toBe("patents")
   })
 })
 
