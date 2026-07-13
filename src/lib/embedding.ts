@@ -87,6 +87,7 @@ export async function fetchEmbedding(
   text: string,
   cfg: EmbeddingConfig,
   maxRetries = 3,
+  inputType: "query" | "document" = "document",
 ): Promise<number[] | null> {
   if (!cfg.endpoint) return null
   try {
@@ -94,6 +95,7 @@ export async function fetchEmbedding(
       text,
       cfg,
       maxRetries,
+      inputType,
     })
     lastEmbeddingError = null
     return embedding
@@ -282,7 +284,7 @@ async function preparePageEmbeddingRows(
   let failedChunks = 0
   for (const chunk of chunks) {
     const embedText = enrichChunkForEmbedding(title, chunk)
-    const vec = await fetchEmbedding(embedText, cfg)
+    const vec = await fetchEmbedding(embedText, cfg, 3, "document")
     if (vec) {
       rows.push({
         chunkIndex: chunk.index,
@@ -610,7 +612,7 @@ export async function searchByEmbedding(
 ): Promise<PageSearchResult[]> {
   if (!cfg.enabled || !cfg.model) return []
 
-  const queryEmb = await fetchEmbedding(query, cfg)
+  const queryEmb = await fetchEmbedding(query, cfg, 3, "query")
   if (!queryEmb) return []
 
   const t0 = performance.now()

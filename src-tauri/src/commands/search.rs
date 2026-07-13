@@ -129,9 +129,11 @@ pub async fn embedding_fetch(
     text: String,
     cfg: SearchEmbeddingConfig,
     max_retries: Option<usize>,
+    input_type: Option<String>,
 ) -> Result<Vec<f32>, String> {
     run_guarded_async("embedding_fetch", async move {
-        fetch_embedding_with_retry(&text, &cfg, max_retries.unwrap_or(3)).await
+        fetch_embedding_with_retry(&text, &cfg, max_retries.unwrap_or(3), input_type.as_deref())
+            .await
     })
     .await
 }
@@ -290,7 +292,7 @@ pub async fn resolve_query_embedding(
     if !cfg.enabled || cfg.endpoint.trim().is_empty() || cfg.model.trim().is_empty() {
         return Ok(None);
     }
-    match fetch_embedding_with_retry(query, &cfg, 0).await {
+    match fetch_embedding_with_retry(query, &cfg, 0, Some("query")).await {
         Ok(embedding) => validate_query_embedding(embedding).map(Some),
         Err(err) => {
             eprintln!("[Search] embedding disabled for this request: {err}");
@@ -1052,12 +1054,13 @@ async fn fetch_embedding_with_retry(
     text: &str,
     cfg: &SearchEmbeddingConfig,
     max_retries: usize,
+    input_type: Option<&str>,
 ) -> Result<Vec<f32>, String> {
     let mut current = text.to_string();
     let mut attempts = 0usize;
     loop {
         attempts += 1;
-        match fetch_embedding_once(&current, cfg).await {
+        match fetch_embedding_once(&current, cfg, input_type).await {
             Ok(embedding) => return Ok(embedding),
             Err(EmbeddingFetchError::Oversize(message)) => {
                 if attempts <= max_retries
@@ -1100,9 +1103,11 @@ enum EmbeddingFetchError {
 async fn fetch_embedding_once(
     text: &str,
     cfg: &SearchEmbeddingConfig,
+    input_type: Option<&str>,
 ) -> Result<Vec<f32>, EmbeddingFetchError> {
     let is_google = is_google_embedding_config(cfg);
     let is_doubao_multimodal = is_doubao_multimodal_embedding_config(cfg);
+    let is_zeroentropy = is_zeroentropy_embedding_config(cfg);
     let endpoint = if is_google {
         google_embedding_endpoint(cfg)
     } else {
@@ -1146,8 +1151,18 @@ async fn fetch_embedding_once(
         google_embedding_body(&cfg.model, text, cfg.output_dimensionality)
     } else if is_doubao_multimodal {
         doubao_multimodal_embedding_body(&cfg.model, text)
+    } else if is_zeroentropy {
+        zeroentropy_embedding_body(&cfg.model, text, cfg.output_dimensionality, input_type)
     } else {
-        json!({ "model": cfg.model, "input": text })
+        let mut body = json!({ "model": cfg.model, "input": text });
+        if let Some(dim) = cfg
+            .output_dimensionality
+            .filter(|d| d.is_finite() && *d >= 1.0)
+            .map(|d| d.floor() as u32)
+        {
+            body["dimensions"] = json!(dim);
+        }
+        body
     };
     let resp = req
         .json(&body)
@@ -1176,7 +1191,7 @@ async fn fetch_embedding_once(
             text.chars().take(200).collect::<String>()
         ))
     })?;
-    parse_embedding_values(&data, is_google, is_doubao_multimodal)
+    parse_embedding_values(&data, is_google, is_doubao_multimodal, is_zeroentropy)
         .map_err(EmbeddingFetchError::Other)
 }
 
@@ -1199,6 +1214,7 @@ fn parse_embedding_values(
     data: &Value,
     is_google: bool,
     is_doubao_multimodal: bool,
+    is_zeroentropy: bool,
 ) -> Result<Vec<f32>, String> {
     let values = if is_google {
         data.get("embedding")
@@ -1206,6 +1222,12 @@ fn parse_embedding_values(
             .and_then(Value::as_array)
     } else if is_doubao_multimodal {
         data.get("data")
+            .and_then(|v| v.get("embedding"))
+            .and_then(Value::as_array)
+    } else if is_zeroentropy {
+        data.get("results")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
             .and_then(|v| v.get("embedding"))
             .and_then(Value::as_array)
     } else {
@@ -1467,6 +1489,32 @@ fn doubao_multimodal_embedding_body(model: &str, text: &str) -> Value {
         "encoding_format": "float",
         "input": [{ "type": "text", "text": text }],
     })
+}
+
+fn is_zeroentropy_embedding_config(cfg: &SearchEmbeddingConfig) -> bool {
+    let endpoint = cfg.endpoint.to_lowercase();
+    endpoint.contains("zeroentropy.dev")
+}
+
+fn zeroentropy_embedding_body(
+    model: &str,
+    text: &str,
+    output_dimensionality: Option<f64>,
+    input_type: Option<&str>,
+) -> Value {
+    let input_type = input_type.unwrap_or("document");
+    let mut body = json!({
+        "model": model,
+        "input": text,
+        "input_type": input_type,
+    });
+    if let Some(dim) = output_dimensionality
+        .filter(|d| d.is_finite() && *d >= 1.0)
+        .map(|d| d.floor() as u32)
+    {
+        body["dimensions"] = json!(dim);
+    }
+    body
 }
 
 pub fn build_snippet(content: &str, query: &str) -> String {
