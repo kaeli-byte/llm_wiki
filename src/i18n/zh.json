@@ -370,7 +370,8 @@
       "interface": "界面",
       "maintenance": "维护",
       "changelog": "更新日志",
-      "about": "关于"
+      "about": "关于",
+      "prompts": "提示词模板"
     },
     "sections": {
       "general": {

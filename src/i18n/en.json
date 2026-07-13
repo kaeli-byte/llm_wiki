@@ -370,7 +370,8 @@
       "interface": "Interface",
       "maintenance": "Maintenance",
       "changelog": "Changelog",
-      "about": "About"
+      "about": "About",
+      "prompts": "Prompts"
     },
     "sections": {
       "general": {

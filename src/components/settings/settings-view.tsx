@@ -15,6 +15,7 @@ import {
   Server,
   Settings,
   FileText,
+  FileEdit,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { invoke } from "@tauri-apps/api/core"
@@ -61,6 +62,7 @@ type CategoryId =
   | "maintenance"
   | "changelog"
   | "about"
+  | "prompts"
 
 interface Category {
   id: CategoryId
@@ -87,6 +89,7 @@ const CATEGORIES: Category[] = [
   { id: "maintenance", labelKey: "settings.categories.maintenance", icon: Wrench },
   { id: "changelog", labelKey: "settings.categories.changelog", icon: History },
   { id: "about", labelKey: "settings.categories.about", icon: Info },
+  { id: "prompts", labelKey: "settings.categories.prompts", icon: FileEdit },
 ]
 
 function initialDraft(
@@ -624,6 +627,8 @@ export function SettingsView() {
         return <MaintenanceSection />
       case "changelog":
         return <ChangelogSection />
+      case "prompts":
+        return <PromptsSection />
       case "about":
         return <AboutSection />
     }
@@ -709,3 +714,4 @@ export function SettingsView() {
     </div>
   )
 }
+import { PromptsSection } from "./sections/prompts-section"

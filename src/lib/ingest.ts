@@ -39,6 +39,7 @@ import {
 } from "@/lib/extract-source-images"
 import { captionMarkdownImages, loadCaptionCache } from "@/lib/image-caption-pipeline"
 import type { MultimodalConfig } from "@/stores/wiki-store"
+import { resolvePrompt } from "@/lib/prompts/resolver"
 import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
@@ -966,7 +967,7 @@ async function autoIngestImpl(
     await streamChat(
       llmConfig,
       [
-        { role: "system", content: buildAnalysisPrompt(purpose, index, sourceContext, schema) },
+        { role: "system", content: (await resolvePrompt("analysis", { purpose, index, sourceContent: sourceContext, schema })) ?? buildAnalysisPrompt(purpose, index, sourceContext, schema) },
         { role: "user", content: `Analyze this source document:\n\n**File:** ${sourceIdentity}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${sourceContext}` },
       ],
       {
@@ -998,7 +999,7 @@ async function autoIngestImpl(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
+      { role: "system", content: (await resolvePrompt("generation", { schema, purpose, index, sourceFileName: sourceIdentity, overview, sourceContent: sourceContext, sourceSummaryPath })) ?? buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
       {
         role: "user",
         content: [
@@ -1048,21 +1049,24 @@ async function autoIngestImpl(
   let reviewSuggestionOutput = ""
   if (!signal?.aborted && shouldRunDedicatedReviewStage(generation)) {
     let reviewStageHadError = false
+    const { maxCtx: reviewMaxCtx } = computeContextBudget(llmConfig.maxContextSize)
+    const reviewSectionCap = Math.max(4_000, Math.floor(reviewMaxCtx * 0.15))
+    const reviewIndexCap = Math.max(3_000, Math.floor(reviewSectionCap * 0.8))
+    const reviewSystemPrompt = (await resolvePrompt("review-suggestion", {
+      purpose,
+      index: trimLongText(index, reviewIndexCap),
+      sourceIdentity,
+      analysis: trimLongText(analysis, reviewSectionCap),
+      sourceContext: trimLongText(sourceContext, reviewSectionCap),
+      generation: trimLongText(generation, reviewSectionCap),
+    })) ?? buildReviewSuggestionPrompt(purpose, index, sourceIdentity, analysis, sourceContext, generation, llmConfig.maxContextSize)
     try {
       await streamChat(
         llmConfig,
         [
           {
             role: "system",
-            content: buildReviewSuggestionPrompt(
-              purpose,
-              index,
-              sourceIdentity,
-              analysis,
-              sourceContext,
-              generation,
-              llmConfig.maxContextSize,
-            ),
+            content: reviewSystemPrompt,
           },
           {
             role: "user",
@@ -1105,6 +1109,7 @@ async function autoIngestImpl(
     signal,
     activityId,
     onFileWritten,
+    purpose,
   )
   throwIfIngestAborted(signal, activityId)
   const writtenPaths = writeResult.writtenPaths
@@ -1139,23 +1144,24 @@ async function autoIngestImpl(
       detail: `Repairing aggregate wiki files: ${repairableAggregatePaths.join(", ")}`,
     })
     let aggregateRepairOutput = ""
+    const aggregateSectionCap = aggregateRepairSectionCap(llmConfig.maxContextSize)
+    const aggregateSystemPrompt = (await resolvePrompt("aggregate-repair", {
+      paths: repairableAggregatePaths.map((p) => `- ${p}`).join("\n"),
+      purpose: trimLongText(purpose, Math.floor(aggregateSectionCap * 0.5)),
+      index: trimLongText(index, aggregateSectionCap),
+      overview: trimLongText(overview, aggregateSectionCap),
+      sourceIdentity,
+      analysis: trimLongText(analysis, aggregateSectionCap),
+      sourceContext: trimLongText(sourceContext, aggregateSectionCap),
+      generation: trimLongText(generation, aggregateSectionCap),
+    })) ?? buildAggregateRepairPrompt(repairableAggregatePaths, purpose, index, overview, sourceIdentity, analysis, sourceContext, generation, llmConfig.maxContextSize)
     try {
       await streamChat(
         llmConfig,
         [
           {
             role: "system",
-            content: buildAggregateRepairPrompt(
-              repairableAggregatePaths,
-              purpose,
-              index,
-              overview,
-              sourceIdentity,
-              analysis,
-              sourceContext,
-              generation,
-              llmConfig.maxContextSize,
-            ),
+            content: aggregateSystemPrompt,
           },
           {
             role: "user",
@@ -1789,6 +1795,7 @@ async function writeFileBlocks(
   signal?: AbortSignal,
   activityId?: string,
   onFileWritten?: (relativePath: string) => void,
+  purpose: string = "",
 ): Promise<{ writtenPaths: string[]; warnings: string[]; hardFailures: string[] }> {
   const { blocks, warnings: parseWarnings } = parseFileBlocks(text)
   const warnings = [...parseWarnings]
@@ -1928,7 +1935,7 @@ async function writeFileBlocks(
         const merged = await mergePageContent(
           content,
           existing || null,
-          buildPageMerger(llmConfig),
+          buildPageMerger(llmConfig, purpose),
           {
             sourceFileName,
             pagePath: relativePath,
@@ -2738,7 +2745,7 @@ async function analyzeLongSourceInChunks(
   }
 
   const activity = useActivityStore.getState()
-  const systemPrompt = buildChunkAnalysisSystemPrompt(purpose, schema, index, sourceContent)
+  const systemPrompt = (await resolvePrompt("chunk-analysis-system", { purpose, schema, index, sourceContent })) ?? buildChunkAnalysisSystemPrompt(purpose, schema, index, sourceContent)
   const sourceHash = hashTextHex(sourceContent)
   const checkpointPath = longSourceCheckpointPath(projectPath, sourceSummarySlug, sourceHash)
   const checkpointParams = {
@@ -2776,7 +2783,17 @@ async function analyzeLongSourceInChunks(
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: buildChunkAnalysisUserPrompt(
+          content: (await resolvePrompt("chunk-analysis-user", {
+            purpose,
+            sourceIdentity,
+            folderContext: folderContext ?? "",
+            chunkIndex: String(chunk.index),
+            chunkTotal: String(chunk.total),
+            headingPath: chunk.headingPath ?? "",
+            globalDigest: trimLongText(globalDigest, LONG_SOURCE_DIGEST_MAX),
+            overlapBefore: chunk.overlapBefore ?? "",
+            chunkMain: chunk.main,
+          })) ?? buildChunkAnalysisUserPrompt(
             sourceIdentity,
             folderContext,
             chunk,
@@ -2852,9 +2869,9 @@ async function analyzeLongSourceInChunks(
  * Page-merge.ts handles all the sanity-checking and fallback paths;
  * this is just the "stream the LLM" wrapper.
  */
-function buildPageMerger(llmConfig: LlmConfig): MergeFn {
+function buildPageMerger(llmConfig: LlmConfig, purpose: string = ""): MergeFn {
   return async (existingContent, incomingContent, sourceFileName, signal) => {
-    const systemPrompt = buildPageMergeSystemPrompt()
+    const systemPrompt = (await resolvePrompt("page-merge", { purpose })) ?? buildPageMergeSystemPrompt()
 
     const userMessage = [
       `## Existing version on disk`,
