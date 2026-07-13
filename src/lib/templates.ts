@@ -637,12 +637,217 @@ ${BASE_CONTRADICTION}
 `,
 }
 
+const industryResearchTemplate: WikiTemplate = {
+  id: "industry-research",
+  name: "Industry Research",
+  description: "Investment research, due diligence, and competitive analysis on companies and industries",
+  icon: "🏭",
+  extraDirs: [
+    "wiki/companies",
+    "wiki/analyses",
+    "wiki/claims",
+    "wiki/markets",
+    "wiki/products",
+    "wiki/technologies",
+    "wiki/people",
+    "wiki/sources",
+    "wiki/entities",
+    "wiki/industries",
+    "wiki/regulations",
+    "wiki/standards",
+    "wiki/media",
+  ],
+  schema: `# Wiki Schema — Industry Research
+
+## Page Types
+
+| Type | Directory | Purpose |
+|------|-----------|---------|
+${BASE_SCHEMA_TYPES}
+| company | wiki/companies/ | Public and private companies, subsidiaries, JVs |
+| claim | wiki/claims/ | Verifiable factual assertions extracted from sources |
+| analysis | wiki/analyses/ | Structured comparative or evaluative assessments |
+| market | wiki/markets/ | Industry and product-market descriptions |
+| product | wiki/products/ | Specific products, models, or product lines |
+| technology | wiki/technologies/ | Technical systems, platforms, and engineering approaches |
+| person | wiki/people/ | Key individuals: executives, founders, board members |
+| industry | wiki/industries/ | High-level industry classification pages |
+| regulation | wiki/regulations/ | Laws, rules, and regulatory frameworks |
+| standard | wiki/standards/ | Technical and industry standards |
+| media | wiki/media/ | Downloaded images and media assets from sources |
+
+## Naming Conventions
+
+${BASE_NAMING}
+- Companies: match official name, kebab-case (e.g., \`tesla-inc.md\`, \`byd-company-limited.md\`)
+- Claims: topic-detail slug (e.g., \`apple-2025-revenue-usd-383b.md\`, \`tesla-cybertruck-2025-deliveries.md\`)
+- Analyses: descriptive slug with year (e.g., \`apple-competitive-position-2025.md\`)
+- Markets: descriptive slug (e.g., \`global-ev-battery-market.md\`)
+- Products: product name slug (e.g., \`iphone-16-pro.md\`)
+- Technologies: technology name slug (e.g., \`dm-hybrid-technology.md\`)
+- People: name as slug (e.g., \`tim-cook.md\`)
+- Sources: document-type category prefix (e.g., \`financial-reports/apple-2025-10k.md\`)
+
+## Frontmatter
+
+${BASE_FRONTMATTER}
+
+Company pages also include:
+\`\`\`yaml
+ticker: ""
+exchange: ""
+headquarters: ""
+\`\`\`
+
+Claim pages also include:
+\`\`\`yaml
+status: supported | refuted | unverified
+confidence: high | medium | low
+\`\`\`
+
+Analysis pages also include:
+\`\`\`yaml
+methodology: ""
+citations: []
+\`\`\`
+
+Source pages also include:
+\`\`\`yaml
+authors: []
+year: YYYY
+url: ""
+venue: ""
+\`\`\`
+
+Concept pages also include:
+\`\`\`yaml
+status: active | draft | archived
+\`\`\`
+
+## Index Format
+
+${BASE_INDEX_FORMAT}
+
+## Log Format
+
+${BASE_LOG_FORMAT}
+
+## Cross-referencing Rules
+
+${BASE_CROSSREF}
+- Use \`[[type/slug]]\` syntax with directory prefix (e.g., \`[[companies/apple-inc]]\`, \`[[claims/apple-2025-revenue]]\`)
+- Every company page should link to its key claims, analyses, and related markets via \`related:\`
+- Claim pages link to the company and source(s) they derive from
+- Analysis pages reference the companies, claims, and markets they evaluate
+- Market pages link to key companies and relevant claims
+- Product and technology pages link to the owning company
+
+## Contradiction Handling
+
+${BASE_CONTRADICTION}
+
+## Industry Research-Specific Conventions
+
+- Claims are the atomic unit of evidence — every factual assertion should be a claim page
+- Every claim should have a \`status\` (supported/refuted/unverified) and \`confidence\` assessment
+- Update claim status as new sources arrive — claims are living documents
+- Analysis pages should cite specific claims as evidence, not make assertions inline
+- Distinguish between primary sources (financial reports, regulatory filings) and secondary sources (analyst reports, news) using tags
+- Company pages are factual summaries; analysis pages are evaluative
+- Source files in \`wiki/media/\` are for downloaded images/PDFs from sources, not wiki content
+`,
+  purpose: `# Project Purpose — Industry Research
+
+## Research Focus
+
+<!-- What industry, sector, or competitive landscape are you researching? -->
+
+>
+
+## Key Questions
+
+<!-- What are the primary business or investment questions driving this research? -->
+
+1.
+2.
+3.
+4.
+5.
+
+## Company Universe
+
+<!-- Companies you are actively tracking — create detailed pages in wiki/companies/ -->
+
+- [ ]
+- [ ]
+- [ ]
+
+## Markets Covered
+
+<!-- Markets and sub-markets relevant to your thesis — create pages in wiki/markets/ -->
+
+- [ ]
+- [ ]
+
+## Thesis / Investment Hypothesis
+
+<!-- Your current working thesis. Update as evidence accumulates. -->
+
+>
+
+## Key Claims Under Investigation
+
+<!-- Critical claims that will validate or refute your thesis — each becomes a claim page. -->
+
+- [ ]
+- [ ]
+- [ ]
+
+## Source Quality Standards
+
+**Primary sources (highest weight):**
+- Official financial reports (annual reports, 10-K, 20-F, quarterly earnings)
+- Regulatory filings and disclosures
+- Investor presentations from the company
+
+**Secondary sources:**
+- Industry analyst reports
+- News coverage (use with caveats)
+- Competitor comparisons (cross-verify)
+
+## Analytical Approach
+
+<!-- Describe your methodology: comparative analysis, DCF, Porter's Five Forces, etc. -->
+
+-
+
+## Scope
+
+**In scope:**
+-
+
+**Out of scope:**
+-
+
+## Success Criteria
+
+<!-- How will you know when you have a well-supported thesis? -->
+
+-
+
+## Current Status
+
+> Not started — update this section as research progresses.
+`,
+}
+
 export const templates: WikiTemplate[] = [
   researchTemplate,
   readingTemplate,
   personalTemplate,
   businessTemplate,
   generalTemplate,
+  industryResearchTemplate,
 ]
 
 export function getTemplate(id: string): WikiTemplate {
