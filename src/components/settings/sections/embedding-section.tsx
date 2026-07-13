@@ -54,6 +54,7 @@ const EMBEDDING_MODEL_SUGGESTIONS = [
   "text-embedding-qwen3-embedding-0.6b",
   "nomic-embed-text",
   "mxbai-embed-large",
+  "zembed-1",
 ]
 
 function headersToText(headers: Record<string, string>): string {
