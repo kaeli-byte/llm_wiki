@@ -18,12 +18,14 @@ src-tauri/gen/
 
 # Environment files
 .env
+
+# Git worktrees
+.worktrees/
 .env.local
 .env.*.local
 
 # Internal docs (not shipped)
 docs/
-AGENTS.md
 
 # Benchmark and test data (local only)
 tests/
