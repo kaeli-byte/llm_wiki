@@ -4,8 +4,11 @@ import {
   buildGenerationPrompt,
   buildPageMergeSystemPrompt,
   computeIngestGenerationMaxTokens,
+  computeIngestPagePlanMaxTokens,
   computeIngestReviewMaxTokens,
   computeIngestSourceBudget,
+  computeIngestPipelineBudget,
+  computeEvidenceExtractionChunkChars,
   formatIngestWarningLogEntry,
   splitSourceIntoSemanticChunks,
 } from "./ingest"
@@ -72,6 +75,12 @@ describe("buildAnalysisPrompt language directive", () => {
   it("does not invent schema content not present in the source", () => {
     const prompt = buildAnalysisPrompt("", "", "", "| goal | wiki/goals/ | x |")
     expect(prompt).toContain("never invent")
+  })
+})
+
+describe("evidence extraction chunk sizing", () => {
+  it("keeps a 12k source budget small enough for dense evidence JSON", () => {
+    expect(computeEvidenceExtractionChunkChars(12_000)).toBe(4_200)
   })
 })
 
@@ -203,6 +212,9 @@ describe("long-source ingest planning", () => {
     expect(computeIngestGenerationMaxTokens(128_000)).toBe(16_384)
     expect(computeIngestGenerationMaxTokens(256_000)).toBe(24_576)
     expect(computeIngestGenerationMaxTokens(1_000_000)).toBe(32_768)
+    expect(computeIngestPagePlanMaxTokens(128_000)).toBe(24_576)
+    expect(computeIngestPagePlanMaxTokens(256_000)).toBe(32_768)
+    expect(computeIngestPagePlanMaxTokens(1_000_000)).toBe(65_536)
     expect(computeIngestReviewMaxTokens(1_000_000)).toBe(8_192)
   })
 
@@ -211,8 +223,15 @@ describe("long-source ingest planning", () => {
     const large = computeIngestSourceBudget(1_000_000, 8_000)
 
     expect(small).toBeGreaterThan(20_000)
-    expect(large).toBeGreaterThan(200_000)
-    expect(large).toBeLessThanOrEqual(300_000)
+    expect(large).toBe(200_000)
+  })
+
+  it("routes a 19k-character filing to the batched pipeline even when it fits a 128k context", () => {
+    const contextBudget = computeIngestSourceBudget(128_000, 8_000)
+    const pipelineBudget = computeIngestPipelineBudget(128_000, 8_000)
+
+    expect(contextBudget).toBeGreaterThan(19_000)
+    expect(pipelineBudget).toBeLessThan(19_000)
   })
 
   it("splits long sources on heading and paragraph boundaries with overlap", () => {

@@ -64,12 +64,16 @@ import { PipelineLogger, quickHash } from "@/lib/pipeline-logger"
 
 const LONG_SOURCE_MIN_BUDGET = 4_000
 const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 200_000
-const LONG_SOURCE_CHUNK_MIN = 6_000
+const LONG_SOURCE_CHUNK_MIN = 4_000
 const LONG_SOURCE_CHUNK_MAX = 40_000
 const LONG_SOURCE_DIGEST_MAX = 10_000
 const BATCH_PIPELINE_SINGLE_PASS_LIMIT = 12_000
 const INGEST_GENERATION_TOKENS_DEFAULT = 8_192
 const INGEST_GENERATION_TOKENS_128K = 16_384
+
+export function computeEvidenceExtractionChunkChars(sourceBudget: number): number {
+  return clampNumber(Math.floor(sourceBudget * 0.35), LONG_SOURCE_CHUNK_MIN, LONG_SOURCE_CHUNK_MAX)
+}
 const INGEST_GENERATION_TOKENS_256K = 24_576
 const INGEST_GENERATION_TOKENS_512K = 32_768
 const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
@@ -2856,7 +2860,7 @@ async function analyzeLongSourceInChunks(
   signal?: AbortSignal,
   pipelineLogger?: PipelineLogger,
 ): Promise<LongSourcePlan> {
-  const targetChars = clampNumber(Math.floor(sourceBudget * 0.55), LONG_SOURCE_CHUNK_MIN, LONG_SOURCE_CHUNK_MAX)
+  const targetChars = computeEvidenceExtractionChunkChars(sourceBudget)
   const overlapChars = clampNumber(Math.floor(targetChars * 0.08), 800, 3_000)
   const chunks = splitSourceIntoSemanticChunks(sourceContent, targetChars, overlapChars)
   if (chunks.length <= 1) {
