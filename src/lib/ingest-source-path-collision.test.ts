@@ -18,6 +18,8 @@ let generationSuffix = ""
 let abortDuringReview: AbortController | null = null
 let interactiveGenerationOverride = ""
 let mergeRequestCount = 0
+let qualityReviewResponses: Array<Record<string, unknown>> = []
+let invalidEntityResolutionOnce = false
 
 vi.mock("./llm-client", () => ({
   streamChat: vi.fn(async (_cfg, messages, cb) => {
@@ -32,7 +34,8 @@ vi.mock("./llm-client", () => ({
       return
     }
 
-    if (systemPrompt.startsWith("You are a wiki generation assistant")) {
+    if ((systemPrompt.startsWith("You are a wiki generation assistant") || systemPrompt.startsWith("You are rendering an evidence-preserving"))
+      && !systemPrompt.toLowerCase().includes("source summary at exactly")) {
       if (interactiveGenerationOverride) {
         cb.onToken(interactiveGenerationOverride)
         cb.onDone()
@@ -57,7 +60,7 @@ vi.mock("./llm-client", () => ({
       return
     }
 
-    if (systemPrompt.startsWith("You are analyzing a long source document")) {
+    if (systemPrompt.startsWith("You are extracting an append-only evidence ledger")) {
       const chunkMatch = userPrompt.match(/Chunk:\s*(\d+)\/(\d+)/)
       const chunkIndex = chunkMatch?.[1] ?? "0"
       const numericChunkIndex = Number(chunkIndex)
@@ -77,7 +80,147 @@ vi.mock("./llm-client", () => ({
       return
     }
 
-    if (systemPrompt.startsWith("You are identifying high-value follow-up research items")) {
+    if (systemPrompt.startsWith("You are extracting a machine-readable evidence ledger")) {
+      const chunkIndex = userPrompt.match(/"index"\s*:\s*(\d+)/)?.[1] ?? "1"
+      const chunkTotal = userPrompt.match(/"total"\s*:\s*(\d+)/)?.[1] ?? "1"
+      if (failLongChunksOnce.has(Number(chunkIndex))) {
+        failLongChunksOnce.delete(Number(chunkIndex))
+        cb.onError(new Error(`chunk ${chunkIndex} failed once`))
+        return
+      }
+      cb.onToken(JSON.stringify({
+        source: { identity: "project-a/long-report.md", document_type: "report" },
+        chunk: { index: Number(chunkIndex), total: Number(chunkTotal) },
+        records: [{
+          id: `C${chunkIndex}-E001`,
+          subject: `Topic ${chunkIndex}`,
+          claim: `Chunk ${chunkIndex} contains decision-relevant evidence.`,
+          evidence_class: "direct",
+          confidence: chunkIndex === "1" ? "high" : "medium",
+          source_locator: { label: `chunk ${chunkIndex}` },
+          candidate_types: ["goal"],
+        }],
+        relations: [],
+        coverage: { configuration: "covered" },
+        open_questions: [],
+      }))
+      cb.onDone()
+      return
+    }
+
+    if (
+      systemPrompt.startsWith("You resolve a compact evidence candidate set") ||
+      systemPrompt.startsWith("Repair an invalid entity-resolution JSON response")
+    ) {
+      if (systemPrompt.startsWith("You resolve a compact evidence candidate set") && invalidEntityResolutionOnce) {
+        invalidEntityResolutionOnce = false
+        cb.onToken('{"version":1,"pages":[')
+        cb.onDone()
+        return
+      }
+      const sourceIdentity = systemPrompt.match(/SOURCE_IDENTITY:\s*\n([^\n]+)/)?.[1]?.trim()
+        ?? systemPrompt.match(/"sourceIdentity":"([^"]+)"/)?.[1]
+        ?? "project-a/long-report.md"
+      const candidateSections = systemPrompt.split("NORMALIZED_CANDIDATES:")
+      const candidatePayload = candidateSections[candidateSections.length - 1] ?? systemPrompt
+      const evidenceIds = [...new Set(candidatePayload.match(/C\d+-E\d{3,}/g) ?? ["C1-E001"])]
+      const kinds = [
+        "source", "company", "segment", "segment", "counterparty", "counterparty",
+        "product", "product", "product", "product", "product", "strategic_topic",
+        "strategic_topic", "strategic_topic", "financial_performance", "risk",
+        "acquisition", "unresolved_questions",
+      ]
+      cb.onToken(JSON.stringify({
+        version: 1,
+        source_identity: sourceIdentity,
+        pages: kinds.map((kind, index) => ({
+          candidate_id: `page-${index + 1}`,
+          kind,
+          title: index === 1 ? "Aeroflex Mobility" : `Portfolio page ${index + 1}`,
+          slug: index === 1 ? "aeroflex-mobility" : `portfolio-page-${index + 1}`,
+          priority: index < 2 ? "critical" : "high",
+          aliases: [],
+          primary_evidence_ids: index > 0 && index <= evidenceIds.length ? [evidenceIds[index - 1]] : [],
+          secondary_evidence_ids: [],
+          related_candidate_ids: [],
+          rationale: "Durable reusable subject.",
+        })),
+        merge_decisions: [],
+      }))
+      cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are planning a complete, evidence-preserving")) {
+      cb.onToken(JSON.stringify({
+        version: 1,
+        source_identity: "project-a/long-report.md",
+        pages: [
+          {
+            path: "wiki/sources/long-report.md",
+            type: "source",
+            title: "Long report",
+            priority: "critical",
+            action: "create",
+            subjects: ["Long report"],
+            evidence_ids: ["C1-E001"],
+            related_paths: ["wiki/goals/topic-1.md"],
+            required_sections: ["Summary"],
+            max_words: 200,
+          },
+          {
+            path: "wiki/goals/topic-1.md",
+            type: "goal",
+            title: "Topic 1",
+            priority: "critical",
+            action: "create",
+            subjects: ["Topic 1"],
+            evidence_ids: ["C1-E001"],
+            related_paths: ["wiki/sources/long-report.md"],
+            required_sections: ["Evidence"],
+            max_words: 200,
+          },
+        ],
+        batches: [{
+          id: "batch-001",
+          page_paths: ["wiki/sources/long-report.md", "wiki/goals/topic-1.md"],
+        }],
+        coverage_summary: {
+          evidence_records_total: 1,
+          evidence_records_assigned: 1,
+          critical_pages: 2,
+          high_pages: 0,
+          unassigned_evidence_ids: [],
+          omitted_low_priority_candidates: [],
+        },
+      }))
+      cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are rendering one approved batch")) {
+      const paths = [...systemPrompt.matchAll(/"path":"([^"]+)"/g)].map((match) => match[1])
+      cb.onToken(paths.map((pagePath) => [
+        `---FILE: ${pagePath}---`,
+        `---\ntype: ${pagePath.includes("/sources/") ? "source" : "goal"}\ntitle: ${pagePath.includes("/sources/") ? "Long report" : "Topic 1"}\nsources: [project-a/long-report.md]\ntags: []\nrelated: []\n---`,
+        pagePath.includes("/sources/") ? "# Long report\n\n## Summary\nEvidence map." : "# Topic 1\n\n## Evidence\nChunk evidence.",
+        "---END FILE---",
+      ].join("\n")).join("\n"))
+      cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are validating an industrial market-intelligence")) {
+      cb.onToken(JSON.stringify(qualityReviewResponses.shift() ?? {
+        passed: true,
+        metrics: { plannedPages: 2, generatedPages: 2, criticalHighCoverage: 1, claimLocatorCoverage: 1, analysisClaimLinkCoverage: 1, brokenLinks: 0, unsupportedClaims: 0 },
+        missingPaths: [], invalidPaths: [], repairBatches: [], warnings: [],
+      }))
+      cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are the quality-review analyst")) {
       if (abortDuringReview) {
         abortDuringReview.abort()
         throw new Error("AbortError")
@@ -88,7 +231,7 @@ vi.mock("./llm-client", () => ({
     }
 
     const targetMatch = systemPrompt.match(
-      /source summary page at \*\*(wiki\/sources\/[^*]+)\*\*/,
+      /source summary at exactly [`*]+(wiki\/sources\/[^`*]+)[`*]+/i,
     )
     if (!targetMatch) {
       cb.onToken("## Analysis\nConfiguration source.")
@@ -99,7 +242,7 @@ vi.mock("./llm-client", () => ({
     const marker = sourceMarkers.shift() ?? "unknown project"
     const targetPath = targetMatch[1]
     const sourceIdentity =
-      systemPrompt.match(/original source file is:\s*\*\*([^*]+)\*\*/i)?.[1] ?? "config.yaml"
+      systemPrompt.match(/Source identity:\s*`([^`]+)`/i)?.[1] ?? "config.yaml"
     cb.onToken([
       `---FILE: ${targetPath}---`,
       "---",
@@ -145,6 +288,8 @@ describe("autoIngest source summary paths", () => {
     abortDuringReview = null
     interactiveGenerationOverride = ""
     mergeRequestCount = 0
+    qualityReviewResponses = []
+    invalidEntityResolutionOnce = false
     mockStreamChat.mockClear()
     mockParseWithMineru.mockReset()
     tmp = await createTempProject("same-basename-sources")
@@ -460,39 +605,88 @@ describe("autoIngest source summary paths", () => {
     )
 
     const chunkCalls = mockStreamChat.mock.calls.filter(([, messages]) =>
-      String(messages?.[0]?.content ?? "").startsWith("You are analyzing a long source document"),
+      String(messages?.[0]?.content ?? "").startsWith("You are extracting a machine-readable evidence ledger"),
     )
     expect(chunkCalls.length).toBeGreaterThan(1)
-    const chunkSystemPrompt = String(chunkCalls[0][1]?.[0]?.content ?? "")
-    expect(chunkSystemPrompt).toContain("wiki/goals/")
-    expect(chunkSystemPrompt).toContain("Schema-Typed Candidates")
-    expect(chunkSystemPrompt).toContain("never invent goals")
-    expect(String(chunkCalls[0][1]?.[1]?.content ?? "")).toContain("## MAIN CHUNK TO ANALYZE")
-    expect(String(chunkCalls[1][1]?.[1]?.content ?? "")).toContain(
-      "Digest after chunk 1: stable context 1.",
-    )
-    expect(String(chunkCalls[1][1]?.[1]?.content ?? "")).not.toContain(
-      "introduced topic 1",
-    )
+    const chunkUserPrompt = String(chunkCalls[0][1]?.[1]?.content ?? "")
+    expect(chunkUserPrompt).toContain("wiki/goals/")
+    expect(chunkUserPrompt).toContain("MAIN_CHUNK")
+    expect(mockStreamChat.mock.calls.some(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("You are planning a complete, evidence-preserving"),
+    )).toBe(false)
+    expect(mockStreamChat.mock.calls.filter(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("You resolve a compact evidence candidate set"),
+    )).toHaveLength(1)
+    expect(mockStreamChat.mock.calls.some(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("Repair an invalid entity-resolution JSON response"),
+    )).toBe(false)
+    expect(mockStreamChat.mock.calls.some(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("You are rendering one approved batch"),
+    )).toBe(true)
+    expect(mockStreamChat.mock.calls.some(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("You are a wiki generation assistant"),
+    )).toBe(false)
+    expect(await fs.readFile(`${tmp.path}/wiki/companies/aeroflex-mobility.md`, "utf8")).toContain("Chunk evidence")
+  })
 
-    const generationCall = mockStreamChat.mock.calls.find(([, messages]) =>
-      String(messages?.[0]?.content ?? "").includes("Based on the analysis provided, generate wiki files"),
+  it("repairs malformed entity resolution once before synthesizing pages", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    invalidEntityResolutionOnce = true
+    const sourcePath = `${tmp.path}/raw/sources/project-a/resolution-repair.md`
+    await writeFileRaw(sourcePath, `# Report\n\n${"R".repeat(27_000)}`)
+
+    await autoIngest(tmp.path, sourcePath, { ...useWikiStore.getState().llmConfig, maxContextSize: 20_000 }, undefined, "project-a")
+
+    const systemPrompts = mockStreamChat.mock.calls.map(([, messages]) => String(messages?.[0]?.content ?? ""))
+    expect(systemPrompts.filter((prompt) => prompt.startsWith("You resolve a compact evidence candidate set"))).toHaveLength(1)
+    expect(systemPrompts.filter((prompt) => prompt.startsWith("Repair an invalid entity-resolution JSON response"))).toHaveLength(1)
+    expect(systemPrompts.some((prompt) => prompt.startsWith("You are rendering one approved batch"))).toBe(true)
+  })
+
+  it("does not cache a batched ingest when semantic quality review fails", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    qualityReviewResponses = [{
+      passed: false,
+      metrics: { plannedPages: 2, generatedPages: 2, criticalHighCoverage: 0, claimLocatorCoverage: 0, analysisClaimLinkCoverage: 0, brokenLinks: 0, unsupportedClaims: 1 },
+      missingPaths: [], invalidPaths: [], repairBatches: [], warnings: ["unsupported claim"],
+    }]
+    const sourcePath = `${tmp.path}/raw/sources/project-a/quality-fail.md`
+    await writeFileRaw(sourcePath, `# Report\n\n${"A".repeat(27_000)}`)
+
+    await autoIngest(tmp.path, sourcePath, { ...useWikiStore.getState().llmConfig, maxContextSize: 20_000 }, undefined, "project-a")
+
+    const cachePath = `${tmp.path}/.llm-wiki/ingest-cache.json`
+    const cache = JSON.parse(await fs.readFile(cachePath, "utf8").catch(() => '{"entries":{}}'))
+    expect(cache.entries["project-a/quality-fail.md"]).toBeUndefined()
+  })
+
+  it("repairs failed pages, re-reviews, and caches only after quality passes", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    qualityReviewResponses = [
+      {
+        passed: false,
+        metrics: { plannedPages: 2, generatedPages: 2, criticalHighCoverage: 1, claimLocatorCoverage: 0, analysisClaimLinkCoverage: 1, brokenLinks: 0, unsupportedClaims: 0 },
+        missingPaths: [], invalidPaths: [],
+        repairBatches: [{ id: "repair-001", pagePaths: ["wiki/companies/aeroflex-mobility.md"], reason: "add evidence locator" }],
+        warnings: [],
+      },
+      {
+        passed: true,
+        metrics: { plannedPages: 2, generatedPages: 2, criticalHighCoverage: 1, claimLocatorCoverage: 1, analysisClaimLinkCoverage: 1, brokenLinks: 0, unsupportedClaims: 0 },
+        missingPaths: [], invalidPaths: [], repairBatches: [], warnings: [],
+      },
+    ]
+    const sourcePath = `${tmp.path}/raw/sources/project-a/quality-repair.md`
+    await writeFileRaw(sourcePath, `# Report\n\n${"B".repeat(27_000)}`)
+
+    await autoIngest(tmp.path, sourcePath, { ...useWikiStore.getState().llmConfig, maxContextSize: 20_000 }, undefined, "project-a")
+
+    const cache = JSON.parse(await fs.readFile(`${tmp.path}/.llm-wiki/ingest-cache.json`, "utf8"))
+    expect(cache.entries["project-a/quality-repair.md"].filesWritten).toContain("wiki/companies/aeroflex-mobility.md")
+    const reviewCalls = mockStreamChat.mock.calls.filter(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("You are validating an industrial market-intelligence"),
     )
-    expect(generationCall).toBeTruthy()
-    const generationPrompt = String(generationCall?.[1]?.[1]?.content ?? "")
-    expect(generationPrompt).toContain("Long Source Context")
-    expect(generationPrompt).toContain(
-      `Digest after chunk ${chunkCalls.length}: stable context ${chunkCalls.length}.`,
-    )
-    const finalDigestSection = generationPrompt
-      .split("## Source Context")[1]
-      ?.split("## Chunk Analysis Notes")[0] ?? ""
-    expect(finalDigestSection).toContain(
-      `Digest after chunk ${chunkCalls.length}: stable context ${chunkCalls.length}.`,
-    )
-    expect(finalDigestSection).not.toContain(
-      `Chunk ${chunkCalls.length} introduced topic ${chunkCalls.length}.`,
-    )
+    expect(reviewCalls).toHaveLength(2)
   })
 
   it("resumes oversized source analysis from the persisted chunk checkpoint", async () => {
@@ -529,16 +723,11 @@ describe("autoIngest source summary paths", () => {
     await autoIngest(tmp.path, longSourcePath, llmConfig, undefined, "project-a")
 
     const resumedChunkCalls = mockStreamChat.mock.calls.filter(([, messages]) =>
-      String(messages?.[0]?.content ?? "").startsWith("You are analyzing a long source document"),
+      String(messages?.[0]?.content ?? "").startsWith("You are extracting a machine-readable evidence ledger"),
     )
     expect(resumedChunkCalls.length).toBeGreaterThan(0)
-    expect(String(resumedChunkCalls[0][1]?.[1]?.content ?? "")).toContain("Chunk: 2/3")
-    expect(String(resumedChunkCalls[0][1]?.[1]?.content ?? "")).toContain(
-      "Digest after chunk 1: stable context 1.",
-    )
-    expect(String(resumedChunkCalls[0][1]?.[1]?.content ?? "")).not.toContain(
-      "introduced topic 1",
-    )
+    expect(String(resumedChunkCalls[0][1]?.[1]?.content ?? "")).toContain('"index":2')
+    expect(String(resumedChunkCalls[0][1]?.[1]?.content ?? "")).toContain("C1-E001")
     await expect(fs.readdir(progressDir)).resolves.toEqual([])
   })
 
