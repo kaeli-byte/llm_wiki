@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { EntityResolution, NormalizedEntityInput, ResolvedPageCandidate } from "./entity-resolution-types"
-import { parseEntityResolution, validateEntityResolution } from "./entity-resolver"
+import { canonicalizeEvidenceOwnership, parseEntityResolution, validateEntityResolution } from "./entity-resolver"
 
 const evidenceIds = Array.from({ length: 17 }, (_, index) => `C1-E${String(index + 1).padStart(3, "0")}`)
 
@@ -71,5 +71,19 @@ describe("entity resolution contract", () => {
     const smaller = { ...resolution, pages: resolution.pages.slice(0, 10) }
     expect(validateEntityResolution(smaller, normalizedInput).errors.join("\n")).toContain("minimum 18")
     expect(validateEntityResolution({ ...smaller, lowerBoundJustification: "Only one product and no segments are supported by the ledger." }, normalizedInput).errors.join("\n")).not.toContain("minimum 18")
+  })
+
+  it("deterministically converts duplicate primaries to secondary references and assigns orphans", () => {
+    const resolution = parseEntityResolution(JSON.stringify(validWireResolution()), normalizedInput)
+    resolution.pages[0].primaryEvidenceIds = [evidenceIds[0]]
+    resolution.pages[1].primaryEvidenceIds = [evidenceIds[0]]
+    resolution.pages[2].primaryEvidenceIds = []
+
+    const canonical = canonicalizeEvidenceOwnership(resolution, normalizedInput)
+    const owners = canonical.pages.filter((page) => page.primaryEvidenceIds.includes(evidenceIds[0]))
+    expect(owners).toHaveLength(1)
+    expect(canonical.pages.some((page) => page.secondaryEvidenceIds.includes(evidenceIds[0]))).toBe(true)
+    expect(canonical.pages.filter((page) => page.primaryEvidenceIds.includes(evidenceIds[1]))).toHaveLength(1)
+    expect(validateEntityResolution(canonical, normalizedInput).valid).toBe(true)
   })
 })

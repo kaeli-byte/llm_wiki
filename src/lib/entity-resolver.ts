@@ -57,6 +57,55 @@ function parsePage(raw: unknown, index: number): ResolvedPageCandidate {
   }
 }
 
+function ownershipScore(page: ResolvedPageCandidate, evidenceId: string, input: NormalizedEntityInput): number {
+  let score = page.primaryEvidenceIds.includes(evidenceId) ? 10 : 0
+  if (page.kind === "financial_performance" && input.financialEvidenceIds.includes(evidenceId)) score += 100
+  if (page.kind === "risk" && input.riskEvidenceIds.includes(evidenceId)) score += 100
+  if (page.kind === "acquisition" && input.acquisitionEvidenceIds.includes(evidenceId)) score += 100
+  if (page.kind === "unresolved_questions" && input.questionGroups.some((group) => group.evidenceIds.includes(evidenceId))) score += 100
+  const candidates = [...input.entities, ...input.strategicThemes].filter((candidate) => candidate.evidenceIds.includes(evidenceId))
+  for (const candidate of candidates) {
+    const labels = [candidate.canonicalLabel, ...candidate.aliases].map((label) => label.toLocaleLowerCase())
+    if (labels.some((label) => page.title.toLocaleLowerCase().includes(label) || label.includes(page.title.toLocaleLowerCase()))) score += 80
+    if (page.kind === candidate.kindHint || (page.kind === "counterparty" && candidate.kindHint === "company")) score += 40
+  }
+  if (page.kind === "company") score += 5
+  if (page.kind === "source") score -= 10
+  return score
+}
+
+/** The model proposes page relevance; deterministic code owns the invariant.
+ * Each evidence ID gets one best primary owner and remains secondary on every
+ * other page that referenced it as primary. */
+export function canonicalizeEvidenceOwnership(
+  resolution: EntityResolution,
+  input: NormalizedEntityInput,
+): EntityResolution {
+  const pages = resolution.pages.map((page) => ({
+    ...page,
+    primaryEvidenceIds: [...new Set(page.primaryEvidenceIds)],
+    secondaryEvidenceIds: [...new Set(page.secondaryEvidenceIds)],
+  }))
+  const sourcePage = pages.find((page) => page.kind === "source")
+  for (const evidenceId of input.evidenceIds) {
+    const referenced = pages.filter((page) =>
+      page.primaryEvidenceIds.includes(evidenceId) || page.secondaryEvidenceIds.includes(evidenceId))
+    const candidates = referenced.length > 0 ? referenced : pages
+    const owner = candidates
+      .map((page, index) => ({ page, index, score: ownershipScore(page, evidenceId, input) }))
+      .sort((a, b) => b.score - a.score || a.index - b.index)[0]?.page ?? sourcePage
+    if (!owner) continue
+    for (const page of pages) {
+      const wasPrimary = page.primaryEvidenceIds.includes(evidenceId)
+      page.primaryEvidenceIds = page.primaryEvidenceIds.filter((id) => id !== evidenceId)
+      page.secondaryEvidenceIds = page.secondaryEvidenceIds.filter((id) => id !== evidenceId)
+      if (page === owner) page.primaryEvidenceIds.push(evidenceId)
+      else if (wasPrimary) page.secondaryEvidenceIds.push(evidenceId)
+    }
+  }
+  return { ...resolution, pages }
+}
+
 export function validateEntityResolution(
   resolution: EntityResolution,
   input: NormalizedEntityInput,
@@ -132,7 +181,8 @@ export function parseEntityResolution(
       ? raw.lower_bound_justification.trim() || undefined
       : undefined,
   }
-  const validation = validateEntityResolution(resolution, input)
+  const canonical = canonicalizeEvidenceOwnership(resolution, input)
+  const validation = validateEntityResolution(canonical, input)
   if (!validation.valid) throw new Error(`Invalid entity resolution: ${validation.errors.join("; ")}`)
-  return resolution
+  return canonical
 }
