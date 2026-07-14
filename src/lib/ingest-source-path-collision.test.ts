@@ -200,9 +200,18 @@ vi.mock("./llm-client", () => ({
 
     if (systemPrompt.startsWith("You are rendering one approved batch")) {
       const paths = [...systemPrompt.matchAll(/"path":"([^"]+)"/g)].map((match) => match[1])
+      const typeForPath = (path: string) => {
+        if (path.includes("/sources/")) return "source"
+        if (path.includes("/companies/")) return "company"
+        if (path.includes("/entities/")) return "entity"
+        if (path.includes("/products/")) return "product"
+        if (path.includes("/analyses/")) return "analysis"
+        if (path.includes("/queries/")) return "query"
+        return "goal"
+      }
       cb.onToken(paths.map((pagePath) => [
         `---FILE: ${pagePath}---`,
-        `---\ntype: ${pagePath.includes("/sources/") ? "source" : "goal"}\ntitle: ${pagePath.includes("/sources/") ? "Long report" : "Topic 1"}\nsources: [project-a/long-report.md]\ntags: []\nrelated: []\n---`,
+        `---\ntype: ${typeForPath(pagePath)}\ntitle: ${pagePath.includes("/sources/") ? "Long report" : "Topic 1"}\nsources: [project-a/long-report.md]\ntags: []\nrelated: []\n---`,
         pagePath.includes("/sources/") ? "# Long report\n\n## Summary\nEvidence map." : "# Topic 1\n\n## Evidence\nChunk evidence.",
         "---END FILE---",
       ].join("\n")).join("\n"))
@@ -653,7 +662,7 @@ describe("autoIngest source summary paths", () => {
     const sourcePath = `${tmp.path}/raw/sources/project-a/quality-fail.md`
     await writeFileRaw(sourcePath, `# Report\n\n${"A".repeat(27_000)}`)
 
-    await autoIngest(tmp.path, sourcePath, { ...useWikiStore.getState().llmConfig, maxContextSize: 20_000 }, undefined, "project-a")
+    await expect(autoIngest(tmp.path, sourcePath, { ...useWikiStore.getState().llmConfig, maxContextSize: 20_000 }, undefined, "project-a")).rejects.toThrow(/quality gate failed/i)
 
     const cachePath = `${tmp.path}/.llm-wiki/ingest-cache.json`
     const cache = JSON.parse(await fs.readFile(cachePath, "utf8").catch(() => '{"entries":{}}'))

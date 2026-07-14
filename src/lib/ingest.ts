@@ -57,7 +57,7 @@ import {
 import { normalizeEntityCandidates } from "@/lib/entity-normalizer"
 import { parseEntityResolution, validateEntityResolution } from "@/lib/entity-resolver"
 import type { EntityResolution, NormalizedEntityInput } from "@/lib/entity-resolution-types"
-import { generateWikiPagesInBatches } from "@/lib/generation-batcher"
+import { commitGeneratedWikiPages, generateWikiPagesInBatches, validateAllBatches } from "@/lib/generation-batcher"
 import { buildPageManifest, runQualityReview, runRepairBatch } from "@/lib/quality-review"
 import type { ConsolidatedEvidenceLedger, WikiPagePlan } from "@/lib/ingest-quality-types"
 import { PipelineLogger, quickHash } from "@/lib/pipeline-logger"
@@ -1057,16 +1057,20 @@ async function autoIngestImpl(
       signal,
       activityId,
       pipelineLogger,
+      deferCommit: true,
       onBatchProgress: (batchIndex, total, status) => activity.updateItem(activityId, {
         detail: `Step 2/2: ${status} (${batchIndex}/${total})`,
       }),
     })
-    batchWrittenPaths = batchResult.batches.flatMap((batch) => batch.generatedPaths)
+    const generatedFiles = batchResult.generatedFiles ?? new Map<string, string>()
+    batchWrittenPaths = [...generatedFiles.keys()]
     qualityGateOk = batchResult.success
     if (!batchResult.success) {
       throw new Error(`Batch generation incomplete: ${batchResult.warnings.join("; ")}`)
     }
 
+    let validation = validateAllBatches(generatedFiles, pagePlan, evidenceLedger)
+    let deterministicFailurePaths = validation.issues.filter((issue) => issue.severity === "error").map((issue) => issue.path)
     let review = await runQualityReview({
       projectPath: pp,
       llmConfig,
@@ -1076,6 +1080,7 @@ async function autoIngestImpl(
       schema,
       signal,
       pipelineLogger,
+      deterministicFailurePaths,
     })
     for (const repairBatch of review.repairBatches.slice(0, 2)) {
       const repaired = await runRepairBatch({
@@ -1091,12 +1096,16 @@ async function autoIngestImpl(
       })
       for (const [path, content] of repaired) {
         if (!pagePlan.pages.some((page) => page.path === path)) continue
-        await createDirectory(`${pp}/${path}`.split("/").slice(0, -1).join("/"))
-        await writeFile(`${pp}/${path}`, content)
+        const stagedPath = `${batchResult.stagingDir}/${path}`
+        await createDirectory(stagedPath.split("/").slice(0, -1).join("/"))
+        await writeFile(stagedPath, content)
+        generatedFiles.set(path, content)
         if (!batchWrittenPaths.includes(path)) batchWrittenPaths.push(path)
       }
     }
     if (review.repairBatches.length > 0) {
+      validation = validateAllBatches(generatedFiles, pagePlan, evidenceLedger)
+      deterministicFailurePaths = validation.issues.filter((issue) => issue.severity === "error").map((issue) => issue.path)
       review = await runQualityReview({
         projectPath: pp,
         llmConfig,
@@ -1106,9 +1115,16 @@ async function autoIngestImpl(
         schema,
         signal,
         pipelineLogger,
+        deterministicFailurePaths,
       })
     }
-    qualityGateOk = review.passed
+    validation = validateAllBatches(generatedFiles, pagePlan, evidenceLedger)
+    qualityGateOk = review.passed && validation.passed
+    if (!qualityGateOk) {
+      const deterministicErrors = validation.issues.filter((issue) => issue.severity === "error").map((issue) => `${issue.path}: ${issue.message}`)
+      throw new Error(`Portfolio quality gate failed: ${[...deterministicErrors, ...review.warnings].join("; ")}`)
+    }
+    await commitGeneratedWikiPages(batchResult.stagingDir, pp, generatedFiles)
   } else {
     const generationSystemPrompt = (await resolvePrompt("generation", { schema, purpose, index, sourceFileName: sourceIdentity, overview, sourceContent: sourceContext, sourceSummaryPath, summaryPath: sourceSummaryPath, today: currentWikiDate() }, { projectPath: pp })) ?? buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath)
     const generationCall = pipelineLogger.createCall("generation", "generate wiki pages", "generation", "builtin", quickHash(generationSystemPrompt), llmConfig.provider, llmConfig.model)
@@ -1407,8 +1423,9 @@ async function autoIngestImpl(
     warning.includes("was not closed before end of stream")
       || warning.includes("likely truncation"),
   )
+  let verifiedWrittenPaths: string[] = []
   if (writtenPaths.length > 0 && hardFailures.length === 0 && !hasTruncationWarning && qualityGateOk) {
-    await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
+    verifiedWrittenPaths = await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
     if (longSourceCheckpointPath) {
       await clearLongSourceCheckpoint(longSourceCheckpointPath)
     }
@@ -1459,7 +1476,8 @@ async function autoIngestImpl(
     filesWritten: writtenPaths,
   })
 
-  pipelineLogger.setTotalPagesGenerated(writtenPaths.length)
+  pipelineLogger.setTotalPagesGenerated(batchWrittenPaths ? new Set(batchWrittenPaths).size : new Set(writtenPaths).size)
+  pipelineLogger.setVerifiedFilesWritten(verifiedWrittenPaths)
   pipelineLogger.setQualityPassed(qualityGateOk)
   await pipelineLogger.finalize()
 

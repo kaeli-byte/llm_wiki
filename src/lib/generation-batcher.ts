@@ -41,6 +41,7 @@ export interface BatchGenerationResult {
   totalPlannedPages: number
   stagingDir: string
   warnings: string[]
+  generatedFiles?: Map<string, string>
 }
 
 export interface BatchGenerationContext {
@@ -58,6 +59,7 @@ export interface BatchGenerationContext {
   onBatchProgress?: (batchIndex: number, total: number, status: string) => void
   pipelineLogger?: PipelineLogger
   maxConcurrentBatches?: number
+  deferCommit?: boolean
 }
 
 // ── Token estimation ──
@@ -91,7 +93,7 @@ async function writeStagedFile(
   return fullPath
 }
 
-async function commitStagedToWiki(
+export async function commitGeneratedWikiPages(
   stagingRoot: string,
   projectPath: string,
   files: Map<string, string>,
@@ -446,8 +448,8 @@ export async function generateWikiPagesInBatches(
   const complete = !hasUnrecoveredInvalidBatch && missingPaths.length === 0
 
   // ── Commit to wiki only when the complete approved plan exists ──
-  if (complete && allGeneratedFiles.size > 0) {
-    await commitStagedToWiki(stagingRoot, pp, allGeneratedFiles)
+  if (complete && allGeneratedFiles.size > 0 && !ctx.deferCommit) {
+    await commitGeneratedWikiPages(stagingRoot, pp, allGeneratedFiles)
     console.log(`[batcher] Committed ${allGeneratedFiles.size} files to wiki`)
   }
 
@@ -458,6 +460,7 @@ export async function generateWikiPagesInBatches(
     totalPlannedPages: ctx.plan.pages.length,
     stagingDir: stagingRoot,
     warnings,
+    generatedFiles: ctx.deferCommit ? allGeneratedFiles : undefined,
   }
 }
 

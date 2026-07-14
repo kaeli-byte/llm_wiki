@@ -19,6 +19,7 @@ beforeEach(() => {
   mockWriteFile.mockReset()
   mockFileExists.mockReset()
   mockWriteFile.mockResolvedValue(undefined as unknown as void)
+  mockFileExists.mockResolvedValue(true)
 })
 
 describe("ingest-cache — checkIngestCache", () => {
@@ -92,5 +93,17 @@ describe("ingest-cache — checkIngestCache", () => {
 
     const result = await checkIngestCache("/project", "foo.pdf", "hello")
     expect(result).toBeNull()
+  })
+})
+
+describe("ingest-cache — saveIngestCache", () => {
+  it("refuses to cache a path that is missing on disk", async () => {
+    mockReadFile.mockResolvedValue(JSON.stringify({ entries: {} }))
+    mockFileExists.mockImplementation(async (path: string) => !path.endsWith("missing.md"))
+    await expect(saveIngestCache("/project", "foo.pdf", "hello", [
+      "wiki/sources/foo.md",
+      "wiki/missing.md",
+    ])).rejects.toThrow(/missing.*wiki\/missing.md/i)
+    expect(mockWriteFile).not.toHaveBeenCalled()
   })
 })

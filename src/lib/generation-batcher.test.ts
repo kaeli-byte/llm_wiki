@@ -2,15 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { ConsolidatedEvidenceLedger, WikiPagePlan } from "./ingest-quality-types"
 import type { FileNode } from "@/types/wiki"
 
-const { streamChatMock, listDirectoryMock, readFileMock } = vi.hoisted(() => ({
+const { streamChatMock, listDirectoryMock, readFileMock, writeFileMock } = vi.hoisted(() => ({
   streamChatMock: vi.fn(),
   listDirectoryMock: vi.fn<() => Promise<FileNode[]>>(async () => []),
   readFileMock: vi.fn<() => Promise<string>>(async () => ""),
+  writeFileMock: vi.fn(async (_path: string, _content: string) => {}),
 }))
 
 vi.mock("@/commands/fs", () => ({
   createDirectory: vi.fn(async () => {}),
-  writeFile: vi.fn(async () => {}),
+  writeFile: writeFileMock,
   deleteFile: vi.fn(async () => {}),
   listDirectory: listDirectoryMock,
   readFile: readFileMock,
@@ -87,6 +88,7 @@ describe("generateWikiPagesInBatches completeness", () => {
     streamChatMock.mockReset()
     listDirectoryMock.mockReset().mockResolvedValue([])
     readFileMock.mockReset().mockResolvedValue("")
+    writeFileMock.mockClear()
   })
 
   it("fails when a closed response silently omits a planned page", async () => {
@@ -243,5 +245,21 @@ describe("generateWikiPagesInBatches completeness", () => {
 
     expect(result.success).toBe(true)
     expect(result.totalGeneratedPages).toBe(1)
+  })
+
+  it("can defer the wiki commit until portfolio QA passes", async () => {
+    const singlePlan: WikiPagePlan = { ...plan, pages: [plan.pages[1]], batches: [{ id: "batch-001", pagePaths: ["wiki/claims/revenue.md"] }] }
+    streamChatMock.mockImplementation(async (_cfg, _messages, callbacks) => {
+      callbacks?.onToken("---FILE: wiki/claims/revenue.md---\n---\ntype: claim\ntitle: Revenue\nevidence_type: direct\nsource_pages: p. 4\n---\n## Evidence\nC1-E001")
+      callbacks?.onDone()
+    })
+    const result = await generateWikiPagesInBatches({
+      projectPath: "/project", sourceSummarySlug: "report", sourceIdentity: "report.pdf",
+      llmConfig: { provider: "openai", model: "test", apiKey: "", ollamaUrl: "", customEndpoint: "", maxContextSize: 128_000 },
+      plan: singlePlan, evidenceLedger, schema: "schema", purpose: "purpose", index: "index", activityId: "activity", deferCommit: true,
+    })
+    expect(result.success).toBe(true)
+    expect(result.generatedFiles?.has("wiki/claims/revenue.md")).toBe(true)
+    expect(writeFileMock.mock.calls.some(([path]) => path === "/project/wiki/claims/revenue.md")).toBe(false)
   })
 })

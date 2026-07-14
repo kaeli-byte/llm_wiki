@@ -76,12 +76,14 @@ export interface PipelineManifest {
   completedAt?: string
   stages: StageEntry[]
   llmCalls: LlmCallEntry[]
+  verifiedWrittenPaths: string[]
   summary: {
     totalLlmCalls: number
     totalLlmDurationMs: number
     totalOutputTokens: number
     totalPagesGenerated: number
     qualityPassed?: boolean
+    verifiedFilesWritten: number
     errors: string[]
   }
 }
@@ -131,11 +133,13 @@ export class PipelineLogger {
       startedAt: new Date().toISOString(),
       stages: [],
       llmCalls: [],
+      verifiedWrittenPaths: [],
       summary: {
         totalLlmCalls: 0,
         totalLlmDurationMs: 0,
         totalOutputTokens: 0,
         totalPagesGenerated: 0,
+        verifiedFilesWritten: 0,
         errors: [],
       },
     }
@@ -351,6 +355,11 @@ export class PipelineLogger {
 
   setTotalPagesGenerated(count: number): void {
     this.manifest.summary.totalPagesGenerated = count
+  }
+
+  setVerifiedFilesWritten(paths: string[]): void {
+    this.manifest.verifiedWrittenPaths = [...new Set(paths)]
+    this.manifest.summary.verifiedFilesWritten = this.manifest.verifiedWrittenPaths.length
   }
 
   async saveManifest(): Promise<void> {

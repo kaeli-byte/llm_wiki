@@ -80,6 +80,13 @@ export async function checkIngestCache(
         console.log(
           `[ingest-cache] cache miss for ${sourceFileName}: ${filePath} no longer on disk`,
         )
+        // Clean up the stale cache entry — do not let ghost entries accumulate
+        try {
+          const cleanedEntries = { ...cache.entries }
+          delete cleanedEntries[sourceFileName]
+          await saveCache(projectPath, { entries: cleanedEntries })
+          console.log(`[ingest-cache] removed stale entry for ${sourceFileName}`)
+        } catch {}
         return null
       }
     } catch {
@@ -100,16 +107,25 @@ export async function saveIngestCache(
   sourceFileName: string,
   sourceContent: string,
   filesWritten: string[],
-): Promise<void> {
+): Promise<string[]> {
+  const pp = normalizePath(projectPath)
+  const verified = [...new Set(filesWritten)]
+  for (const filePath of verified) {
+    const fullPath = isAbsolutePath(filePath) ? normalizePath(filePath) : `${pp}/${filePath}`
+    if (!(await fileExists(fullPath))) {
+      throw new Error(`Cannot save ingest cache: missing written path ${filePath}`)
+    }
+  }
   const cache = await loadCache(projectPath)
   const hash = await sha256(sourceContent)
   const newEntries = { ...cache.entries }
   newEntries[sourceFileName] = {
     hash,
     timestamp: Date.now(),
-    filesWritten,
+    filesWritten: verified,
   }
   await saveCache(projectPath, { entries: newEntries })
+  return verified
 }
 
 /**
