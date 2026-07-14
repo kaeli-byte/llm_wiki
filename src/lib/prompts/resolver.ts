@@ -1,22 +1,16 @@
 /**
- * Prompt template resolver for LLM Wiki ingest pipeline.
+ * Prompt template resolver for the LLM Wiki ingest pipeline.
  *
- * Renders templates with {{var}} for substitution and
- * {{#if var}}...{{/if}} for conditional blocks.
+ * Lookup order:
+ *   1. Project override: <project>/.llm-wiki/prompts/<name>.md
+ *   2. Built-in template bundled by Vite
+ *   3. Source-tree fallback used by tests/development
  *
- * Template lookup order:
- *   1. User override: {projectPath}/.llm-wiki/prompts/{name}.md
- *   2. Built-in:     bundled into JS at build time (builtin-content.ts)
- *   3. Filesystem fallback: src/lib/prompts/builtin/{name}.md (tests only)
- *
- * Dynamic values should be pre-computed by the caller and passed as vars:
- *   - languageRule → buildLanguageDirective(sourceContent)
- *   - today        → currentWikiDate()
- *   - knownTypes   → GENERATION_WIKI_TYPES.join(" | ")
- *   - Content trimming → applied before passing vars
- *
- * The resolver will auto-inject languageRule (from sourceContent) and
- * knownTypes when not provided, but does NOT do content trimming.
+ * This version also:
+ *   - injects common variables (`today`, `languageRule`, `knownTypes`)
+ *   - supports the legacy `sourceSummaryPath` variable as `summaryPath`
+ *   - reports which template source was selected
+ *   - rejects unresolved template placeholders instead of silently rendering blanks
  */
 
 import { readFile } from "@/commands/fs"
@@ -26,6 +20,13 @@ import { BUILTIN_TEMPLATES } from "@/lib/prompts/builtin-content"
 
 const BUILTIN_DIR = "src/lib/prompts/builtin"
 const BUILTIN_CACHE: Record<string, string> = {}
+
+function currentWikiDate(now = new Date()): string {
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, "0")
+  const day = String(now.getDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
 
 async function loadBuiltinFallback(name: string): Promise<string | null> {
   if (BUILTIN_CACHE[name]) return BUILTIN_CACHE[name]
@@ -51,73 +52,105 @@ async function loadUserTemplate(
 }
 
 function getBuiltinContent(name: string): string | null {
-  // Primary: bundled at build time via import.meta.glob
-  if (BUILTIN_TEMPLATES[name]) return BUILTIN_TEMPLATES[name]
-  return null
+  return BUILTIN_TEMPLATES[name] ?? null
 }
 
-/**
- * Render a template string: substitute {{var}} and process {{#if var}}...{{/if}}.
- * Conditional blocks are included only when the variable is non-empty.
- */
-export function renderTemplate(
+function applyConditionals(
   template: string,
   vars: Record<string, string>,
 ): string {
   let result = template
   const ifRegex = /\{\{#if\s+(\w+)\}\}([\s\S]*?)\{\{\/if\}\}/g
-  let prev = ""
-  while (prev !== result) {
-    prev = result
+  let previous = ""
+  while (previous !== result) {
+    previous = result
     result = result.replace(ifRegex, (_match, varName: string, body: string) => {
       return (vars[varName] ?? "").trim() ? body : ""
     })
   }
-  result = result.replace(/\{\{(\w+)\}\}/g, (_match, varName: string) => {
-    return vars[varName] ?? ""
-  })
   return result
+}
+
+function requiredPlaceholderNames(template: string): string[] {
+  return [...new Set(
+    Array.from(template.matchAll(/\{\{(\w+)\}\}/g)).map((match) => match[1]),
+  )]
+}
+
+export function renderTemplate(
+  template: string,
+  vars: Record<string, string>,
+): string {
+  return applyConditionals(template, vars).replace(
+    /\{\{(\w+)\}\}/g,
+    (_match, varName: string) => vars[varName] ?? "",
+  )
 }
 
 export interface ResolvePromptOptions {
   projectPath?: string
+  /** Throw when a placeholder is unresolved. Default: true. */
+  strict?: boolean
+  /** Optional diagnostics sink for tests or UI logging. */
+  onResolved?: (info: { name: string; source: "override" | "builtin" | "fallback" }) => void
 }
 
-/**
- * Load and render a prompt template.
- *
- * Auto-injects languageRule (from sourceContent if present) and knownTypes.
- * Content trimming and date formatting must be done by the caller.
- */
+function missingRequiredVariables(
+  template: string,
+  vars: Record<string, string>,
+): string[] {
+  const afterConditionals = applyConditionals(template, vars)
+  return requiredPlaceholderNames(afterConditionals).filter(
+    (name) => !(name in vars),
+  )
+}
+
 export async function resolvePrompt(
   name: string,
   vars: Record<string, string>,
   options: ResolvePromptOptions = {},
 ): Promise<string | null> {
-  const resolvedVars = { ...vars }
+  const resolvedVars: Record<string, string> = { ...vars }
+
   if (!resolvedVars.languageRule) {
-    resolvedVars.languageRule = buildLanguageDirective(
-      resolvedVars.sourceContent ?? "",
-    )
+    resolvedVars.languageRule = buildLanguageDirective(resolvedVars.sourceContent ?? "")
   }
   if (!resolvedVars.knownTypes) {
     resolvedVars.knownTypes = GENERATION_WIKI_TYPES.join(" | ")
   }
+  if (!resolvedVars.today) {
+    resolvedVars.today = currentWikiDate()
+  }
+  if (!resolvedVars.summaryPath && resolvedVars.sourceSummaryPath) {
+    resolvedVars.summaryPath = resolvedVars.sourceSummaryPath
+  }
 
-  // 1. User override
   let template: string | null = null
+  let source: "override" | "builtin" | "fallback" | null = null
+
   if (options.projectPath) {
     template = await loadUserTemplate(options.projectPath, name)
+    if (template) source = "override"
   }
-  // 2. Built-in (bundled at build time)
   if (!template) {
     template = getBuiltinContent(name)
+    if (template) source = "builtin"
   }
-  // 3. Filesystem fallback (tests, dev environment)
   if (!template) {
     template = await loadBuiltinFallback(name)
+    if (template) source = "fallback"
   }
-  if (!template) return null
+  if (!template || !source) return null
 
-  return renderTemplate(template, resolvedVars)
+  const missing = missingRequiredVariables(template, resolvedVars)
+  if (missing.length > 0) {
+    const message = `Prompt "${name}" is missing required variables: ${missing.join(", ")}`
+    if (options.strict !== false) throw new Error(message)
+    console.warn(`[prompts] ${message}`)
+  }
+
+  const rendered = renderTemplate(template, resolvedVars)
+  options.onResolved?.({ name, source })
+  console.debug(`[prompts] resolved "${name}" from ${source}`)
+  return rendered
 }
