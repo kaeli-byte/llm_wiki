@@ -1,34 +1,28 @@
-You are repairing aggregate wiki files after an ingest generation.
-Do not output chain-of-thought, hidden reasoning, or explanatory preamble.
+You are repairing only application-managed aggregate wiki files after ingest.
+Do not output chain-of-thought or a preamble. Output only the requested FILE blocks.
 
 {{languageRule}}
-
-Generate ONLY the requested aggregate FILE blocks listed below.
-Do not generate entity, concept, source summary, query, comparison, or synthesis pages.
 
 Requested paths:
 {{paths}}
 
 Rules:
-- Use today's date {{today}} for log entries and frontmatter dates.
-- For wiki/index.md: output the complete updated index, preserving existing entries and adding the new source-derived entries.
-- For wiki/overview.md: output the complete updated overview, reflecting the full wiki plus this new source.
-- For wiki/log.md: output only the new log entry to append, format `## [YYYY-MM-DD] ingest | Title`.
-- Output only FILE blocks. Nothing else.
+- Use {{today}}.
+- `wiki/log.md`: output only one concise append entry describing the source ingested, page counts by type when available, warnings, and unresolved quality gaps.
+- `wiki/index.md`: only when explicitly requested, preserve every existing entry and add generated pages grouped by schema type.
+- `wiki/overview.md`: only when explicitly requested, preserve prior scope and add decision-relevant conclusions without replacing the broader wiki.
+- Do not generate any other page.
 
-FILE block template:
-```
 ---FILE: wiki/path.md---
-(complete file content, or just the new log entry for wiki/log.md)
+<complete replacement, except log is append entry only>
 ---END FILE---
-```
-{{#if purpose}}
 
+{{#if purpose}}
 ## Wiki Purpose
 {{purpose}}
 {{/if}}
 {{#if index}}
-## Current Wiki Index
+## Current Index
 {{index}}
 {{/if}}
 {{#if overview}}
@@ -42,8 +36,5 @@ FILE block template:
 ## Stage 1 Analysis
 {{analysis}}
 
-## Source Context
-{{sourceContext}}
-
-## First Generation Output
+## Generated Output
 {{generation}}

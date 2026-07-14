@@ -43,15 +43,37 @@ import { resolvePrompt } from "@/lib/prompts/resolver"
 import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
+import {
+  consolidateEvidenceLedgers,
+  getEvidenceLedgerSchema,
+  parseChunkEvidenceLedger,
+  type ChunkEvidenceLedger,
+} from "@/lib/evidence-ledger"
+import {
+  buildResolvedPagePlan,
+  checkPlanCoverage,
+  validateBatchConstraints,
+} from "@/lib/page-planner"
+import { normalizeEntityCandidates } from "@/lib/entity-normalizer"
+import { parseEntityResolution, validateEntityResolution } from "@/lib/entity-resolver"
+import type { EntityResolution, NormalizedEntityInput } from "@/lib/entity-resolution-types"
+import { commitGeneratedWikiPages, generateWikiPagesInBatches, validateAllBatches } from "@/lib/generation-batcher"
+import { buildPageManifest, runQualityReview, runRepairBatch } from "@/lib/quality-review"
+import type { ConsolidatedEvidenceLedger, WikiPagePlan } from "@/lib/ingest-quality-types"
+import { PipelineLogger, quickHash } from "@/lib/pipeline-logger"
 
-const LONG_SOURCE_MIN_BUDGET = 8_000
-const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
-const LONG_SOURCE_CHUNK_MIN = 12_000
-const LONG_SOURCE_CHUNK_MAX = 60_000
-const LONG_SOURCE_DIGEST_MAX = 15_000
-const LONG_SOURCE_CHUNK_ANALYSIS_MAX = 40_000
+const LONG_SOURCE_MIN_BUDGET = 4_000
+const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 200_000
+const LONG_SOURCE_CHUNK_MIN = 4_000
+const LONG_SOURCE_CHUNK_MAX = 40_000
+const LONG_SOURCE_DIGEST_MAX = 10_000
+const BATCH_PIPELINE_SINGLE_PASS_LIMIT = 12_000
 const INGEST_GENERATION_TOKENS_DEFAULT = 8_192
 const INGEST_GENERATION_TOKENS_128K = 16_384
+
+export function computeEvidenceExtractionChunkChars(sourceBudget: number): number {
+  return clampNumber(Math.floor(sourceBudget * 0.35), LONG_SOURCE_CHUNK_MIN, LONG_SOURCE_CHUNK_MAX)
+}
 const INGEST_GENERATION_TOKENS_256K = 24_576
 const INGEST_GENERATION_TOKENS_512K = 32_768
 const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
@@ -277,6 +299,8 @@ interface LongSourcePlan {
   analysis: string
   sourceContext: string
   checkpointPath?: string
+  evidenceLedger?: ConsolidatedEvidenceLedger
+  pagePlan?: WikiPagePlan
 }
 
 interface LongSourceCheckpoint {
@@ -291,6 +315,9 @@ interface LongSourceCheckpoint {
   completedThrough: number
   globalDigest: string
   analyses: string[]
+  normalizedInput?: NormalizedEntityInput
+  entityResolution?: EntityResolution
+  pagePlan?: WikiPagePlan
   updatedAt: number
 }
 
@@ -697,6 +724,17 @@ async function autoIngestImpl(
     tryReadFile(`${pp}/wiki/index.md`),
     tryReadFile(`${pp}/wiki/overview.md`),
   ])
+  let sourceSizeBytes = sourceContent.length
+  try { sourceSizeBytes = await getFileSize(sp) } catch { /* use extracted text length */ }
+  const pipelineLogger = new PipelineLogger(
+    pp,
+    sourceIdentity,
+    sp,
+    sourceSizeBytes,
+    quickHash(sourceContent),
+    sourceContent.length,
+  )
+  await pipelineLogger.ensureDirectories()
   if (isPdf && mineruSavedImages.length === 0 && hasMineruImageRefs(sourceContent, sourceSummarySlug)) {
     mineruSavedImages = await savedImagesFromMineruMarkdown(pp, sourceSummarySlug, sourceContent)
     if (mineruSavedImages.length > 0) {
@@ -925,10 +963,14 @@ async function autoIngestImpl(
   }
 
   const stableContextLength = schema.length + purpose.length + index.length + overview.length
-  const sourceBudget = computeIngestSourceBudget(llmConfig.maxContextSize, stableContextLength)
+  const sourceBudget = computeIngestPipelineBudget(llmConfig.maxContextSize, stableContextLength)
   let sourceContext = enrichedSourceContent
   let precomputedAnalysis = ""
   let longSourceCheckpointPath: string | undefined
+  let evidenceLedger: ConsolidatedEvidenceLedger | undefined
+  let pagePlan: WikiPagePlan | undefined
+
+  console.log(`[pipeline] chunking budget: source=${enrichedSourceContent.length} chars, budget=${sourceBudget} chars`)
 
   if (enrichedSourceContent.length > sourceBudget) {
     const longSourcePlan = await analyzeLongSourceInChunks(
@@ -939,16 +981,20 @@ async function autoIngestImpl(
       index,
       sourceIdentity,
       sourceSummarySlug,
+      sourceSummaryPath,
       folderContext,
       enrichedSourceContent,
       sourceBudget,
       activityId,
       signal,
+      pipelineLogger,
     )
     if (longSourcePlan.chunked) {
       sourceContext = longSourcePlan.sourceContext
       precomputedAnalysis = longSourcePlan.analysis
       longSourceCheckpointPath = longSourcePlan.checkpointPath
+      evidenceLedger = longSourcePlan.evidenceLedger
+      pagePlan = longSourcePlan.pagePlan
     }
   }
 
@@ -964,22 +1010,25 @@ async function autoIngestImpl(
   let analysis = precomputedAnalysis
 
   if (!analysis) {
+    const analysisSystemPrompt = (await resolvePrompt("analysis", { purpose, index, sourceContent: sourceContext, schema, today: currentWikiDate() }, { projectPath: pp })) ?? buildAnalysisPrompt(purpose, index, sourceContext, schema)
+    const analysisCall = pipelineLogger.createCall("analysis", "analyze source", "analysis", "builtin", quickHash(analysisSystemPrompt), llmConfig.provider, llmConfig.model)
     await streamChat(
       llmConfig,
       [
-        { role: "system", content: (await resolvePrompt("analysis", { purpose, index, sourceContent: sourceContext, schema })) ?? buildAnalysisPrompt(purpose, index, sourceContext, schema) },
+        { role: "system", content: analysisSystemPrompt },
         { role: "user", content: `Analyze this source document:\n\n**File:** ${sourceIdentity}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${sourceContext}` },
       ],
       {
-        onToken: (token) => { analysis += token },
+        onToken: (token) => { analysis += token; analysisCall.onToken(token) },
         onDone: () => {},
         onError: (err) => {
           activity.updateItem(activityId, { status: "error", detail: `Analysis failed: ${err.message}` })
         },
       },
       signal,
-      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
+      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: computeIngestAnalysisMaxTokens(llmConfig.maxContextSize) },
     )
+    analysisCall.onComplete(analysis.length, Math.ceil(analysis.length / 4))
   }
 
   // A silent `return []` here would look like success to the queue
@@ -995,11 +1044,98 @@ async function autoIngestImpl(
   activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
 
   let generation = ""
+  let batchWrittenPaths: string[] | undefined
+  let qualityGateOk = true
 
-  await streamChat(
+  if (pagePlan && evidenceLedger) {
+    const batchResult = await generateWikiPagesInBatches({
+      projectPath: pp,
+      sourceSummarySlug,
+      sourceIdentity,
+      llmConfig,
+      plan: pagePlan,
+      evidenceLedger,
+      schema,
+      purpose,
+      index,
+      signal,
+      activityId,
+      pipelineLogger,
+      deferCommit: true,
+      onBatchProgress: (batchIndex, total, status) => activity.updateItem(activityId, {
+        detail: `Step 2/2: ${status} (${batchIndex}/${total})`,
+      }),
+    })
+    const generatedFiles = batchResult.generatedFiles ?? new Map<string, string>()
+    batchWrittenPaths = [...generatedFiles.keys()]
+    qualityGateOk = batchResult.success
+    if (!batchResult.success) {
+      throw new Error(`Batch generation incomplete: ${batchResult.warnings.join("; ")}`)
+    }
+
+    let validation = validateAllBatches(generatedFiles, pagePlan, evidenceLedger)
+    let deterministicFailurePaths = validation.issues.filter((issue) => issue.severity === "error").map((issue) => issue.path)
+    let review = await runQualityReview({
+      projectPath: pp,
+      llmConfig,
+      pagePlan,
+      evidenceLedger,
+      generatedPageManifest: buildPageManifest(batchWrittenPaths, pagePlan),
+      schema,
+      signal,
+      pipelineLogger,
+      deterministicFailurePaths,
+    })
+    for (const repairBatch of review.repairBatches.slice(0, 2)) {
+      const repaired = await runRepairBatch({
+        projectPath: pp,
+        llmConfig,
+        pagePlan,
+        evidenceLedger,
+        generatedPageManifest: buildPageManifest(batchWrittenPaths, pagePlan),
+        schema,
+        signal,
+        pipelineLogger,
+        repairBatch,
+      })
+      for (const [path, content] of repaired) {
+        if (!pagePlan.pages.some((page) => page.path === path)) continue
+        const stagedPath = `${batchResult.stagingDir}/${path}`
+        await createDirectory(stagedPath.split("/").slice(0, -1).join("/"))
+        await writeFile(stagedPath, content)
+        generatedFiles.set(path, content)
+        if (!batchWrittenPaths.includes(path)) batchWrittenPaths.push(path)
+      }
+    }
+    if (review.repairBatches.length > 0) {
+      validation = validateAllBatches(generatedFiles, pagePlan, evidenceLedger)
+      deterministicFailurePaths = validation.issues.filter((issue) => issue.severity === "error").map((issue) => issue.path)
+      review = await runQualityReview({
+        projectPath: pp,
+        llmConfig,
+        pagePlan,
+        evidenceLedger,
+        generatedPageManifest: buildPageManifest(batchWrittenPaths, pagePlan),
+        schema,
+        signal,
+        pipelineLogger,
+        deterministicFailurePaths,
+      })
+    }
+    validation = validateAllBatches(generatedFiles, pagePlan, evidenceLedger)
+    qualityGateOk = review.passed && validation.passed
+    if (!qualityGateOk) {
+      const deterministicErrors = validation.issues.filter((issue) => issue.severity === "error").map((issue) => `${issue.path}: ${issue.message}`)
+      throw new Error(`Portfolio quality gate failed: ${[...deterministicErrors, ...review.warnings].join("; ")}`)
+    }
+    await commitGeneratedWikiPages(batchResult.stagingDir, pp, generatedFiles)
+  } else {
+    const generationSystemPrompt = (await resolvePrompt("generation", { schema, purpose, index, sourceFileName: sourceIdentity, overview, sourceContent: sourceContext, sourceSummaryPath, summaryPath: sourceSummaryPath, today: currentWikiDate() }, { projectPath: pp })) ?? buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath)
+    const generationCall = pipelineLogger.createCall("generation", "generate wiki pages", "generation", "builtin", quickHash(generationSystemPrompt), llmConfig.provider, llmConfig.model)
+    await streamChat(
     llmConfig,
     [
-      { role: "system", content: (await resolvePrompt("generation", { schema, purpose, index, sourceFileName: sourceIdentity, overview, sourceContent: sourceContext, sourceSummaryPath })) ?? buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
+      { role: "system", content: generationSystemPrompt },
       {
         role: "user",
         content: [
@@ -1026,7 +1162,7 @@ async function autoIngestImpl(
       },
     ],
     {
-      onToken: (token) => { generation += token },
+      onToken: (token) => { generation += token; generationCall.onToken(token) },
       onDone: () => {},
       onError: (err) => {
         activity.updateItem(activityId, { status: "error", detail: `Generation failed: ${err.message}` })
@@ -1039,6 +1175,8 @@ async function autoIngestImpl(
       max_tokens: computeIngestGenerationMaxTokens(llmConfig.maxContextSize),
     },
   )
+    generationCall.onComplete(generation.length, Math.ceil(generation.length / 4))
+  }
 
   const generationActivity = useActivityStore.getState().items.find((i) => i.id === activityId)
   if (generationActivity?.status === "error") {
@@ -1047,7 +1185,7 @@ async function autoIngestImpl(
   throwIfIngestAborted(signal, activityId)
 
   let reviewSuggestionOutput = ""
-  if (!signal?.aborted && shouldRunDedicatedReviewStage(generation)) {
+  if (!batchWrittenPaths && !signal?.aborted && shouldRunDedicatedReviewStage(generation)) {
     let reviewStageHadError = false
     const { maxCtx: reviewMaxCtx } = computeContextBudget(llmConfig.maxContextSize)
     const reviewSectionCap = Math.max(4_000, Math.floor(reviewMaxCtx * 0.15))
@@ -1059,7 +1197,7 @@ async function autoIngestImpl(
       analysis: trimLongText(analysis, reviewSectionCap),
       sourceContext: trimLongText(sourceContext, reviewSectionCap),
       generation: trimLongText(generation, reviewSectionCap),
-    })) ?? buildReviewSuggestionPrompt(purpose, index, sourceIdentity, analysis, sourceContext, generation, llmConfig.maxContextSize)
+    }, { projectPath: pp })) ?? buildReviewSuggestionPrompt(purpose, index, sourceIdentity, analysis, sourceContext, generation, llmConfig.maxContextSize)
     try {
       await streamChat(
         llmConfig,
@@ -1100,17 +1238,19 @@ async function autoIngestImpl(
   throwIfIngestAborted(signal, activityId)
   activity.updateItem(activityId, { detail: "Writing files..." })
   await migrateLegacySourceSummaryIfSafe(pp, sourceIdentity, sourceSummaryPath)
-  const writeResult = await writeFileBlocks(
-    pp,
-    generation,
-    llmConfig,
-    sourceIdentity,
-    sourceSummaryPath,
-    signal,
-    activityId,
-    onFileWritten,
-    purpose,
-  )
+  const writeResult = batchWrittenPaths
+    ? { writtenPaths: [...batchWrittenPaths], warnings: [] as string[], hardFailures: [] as string[] }
+    : await writeFileBlocks(
+      pp,
+      generation,
+      llmConfig,
+      sourceIdentity,
+      sourceSummaryPath,
+      signal,
+      activityId,
+      onFileWritten,
+      purpose,
+    )
   throwIfIngestAborted(signal, activityId)
   const writtenPaths = writeResult.writtenPaths
   const writeWarnings = writeResult.warnings
@@ -1154,7 +1294,8 @@ async function autoIngestImpl(
       analysis: trimLongText(analysis, aggregateSectionCap),
       sourceContext: trimLongText(sourceContext, aggregateSectionCap),
       generation: trimLongText(generation, aggregateSectionCap),
-    })) ?? buildAggregateRepairPrompt(repairableAggregatePaths, purpose, index, overview, sourceIdentity, analysis, sourceContext, generation, llmConfig.maxContextSize)
+      today: currentWikiDate(),
+    }, { projectPath: pp })) ?? buildAggregateRepairPrompt(repairableAggregatePaths, purpose, index, overview, sourceIdentity, analysis, sourceContext, generation, llmConfig.maxContextSize)
     try {
       await streamChat(
         llmConfig,
@@ -1282,8 +1423,13 @@ async function autoIngestImpl(
   // mismatch, path-traversal rejection, empty-path) are NOT failures
   // — they represent deterministic decisions and caching them is
   // safe.
-  if (writtenPaths.length > 0 && hardFailures.length === 0) {
-    await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
+  const hasTruncationWarning = writeWarnings.some((warning) =>
+    warning.includes("was not closed before end of stream")
+      || warning.includes("likely truncation"),
+  )
+  let verifiedWrittenPaths: string[] = []
+  if (writtenPaths.length > 0 && hardFailures.length === 0 && !hasTruncationWarning && qualityGateOk) {
+    verifiedWrittenPaths = await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
     if (longSourceCheckpointPath) {
       await clearLongSourceCheckpoint(longSourceCheckpointPath)
     }
@@ -1291,6 +1437,12 @@ async function autoIngestImpl(
     console.warn(
       `[ingest] Skipping cache save for "${sourceIdentity}" — ${hardFailures.length} block(s) failed to write: ${hardFailures.join(", ")}`,
     )
+  } else if (hasTruncationWarning) {
+    console.warn(
+      `[ingest] Skipping cache save for "${sourceIdentity}" because generation was truncated.`,
+    )
+  } else if (!qualityGateOk) {
+    console.warn(`[ingest] Skipping cache save for "${sourceIdentity}" because the quality gate failed.`)
   }
 
   // ── Step 6: Generate embeddings (if enabled) ───────────────
@@ -1327,6 +1479,11 @@ async function autoIngestImpl(
     detail,
     filesWritten: writtenPaths,
   })
+
+  pipelineLogger.setTotalPagesGenerated(batchWrittenPaths ? new Set(batchWrittenPaths).size : new Set(writtenPaths).size)
+  pipelineLogger.setVerifiedFilesWritten(verifiedWrittenPaths)
+  pipelineLogger.setQualityPassed(qualityGateOk)
+  await pipelineLogger.finalize()
 
   return writtenPaths
 }
@@ -1935,7 +2092,7 @@ async function writeFileBlocks(
         const merged = await mergePageContent(
           content,
           existing || null,
-          buildPageMerger(llmConfig, purpose),
+          buildPageMerger(llmConfig, purpose, projectPath),
           {
             sourceFileName,
             pagePath: relativePath,
@@ -2431,12 +2588,42 @@ export function computeIngestSourceBudget(
   return clampNumber(Math.floor(available), LONG_SOURCE_MIN_BUDGET, upper)
 }
 
+/**
+ * The source may fit the model context while the requested multi-page output
+ * cannot fit one response. Route medium/large documents through planning and
+ * batches once source analysis itself is large enough to produce many pages.
+ */
+export function computeIngestPipelineBudget(
+  maxContextSize: number | undefined,
+  stableContextLength: number,
+): number {
+  return Math.min(
+    computeIngestSourceBudget(maxContextSize, stableContextLength),
+    BATCH_PIPELINE_SINGLE_PASS_LIMIT,
+  )
+}
+
 export function computeIngestGenerationMaxTokens(maxContextSize: number | undefined): number {
   const { maxCtx } = computeContextBudget(maxContextSize)
   if (maxCtx >= 512_000) return INGEST_GENERATION_TOKENS_512K
   if (maxCtx >= 256_000) return INGEST_GENERATION_TOKENS_256K
   if (maxCtx >= 128_000) return INGEST_GENERATION_TOKENS_128K
   return INGEST_GENERATION_TOKENS_DEFAULT
+}
+
+export function computeIngestAnalysisMaxTokens(maxContextSize: number | undefined): number {
+  const { maxCtx } = computeContextBudget(maxContextSize)
+  if (maxCtx >= 256_000) return 16_384
+  if (maxCtx >= 128_000) return 12_288
+  return 8_192
+}
+
+export function computeIngestPagePlanMaxTokens(maxContextSize: number | undefined): number {
+  const { maxCtx } = computeContextBudget(maxContextSize)
+  if (maxCtx >= 512_000) return 65_536
+  if (maxCtx >= 256_000) return 32_768
+  if (maxCtx >= 128_000) return 24_576
+  return 12_288
 }
 
 export function computeIngestReviewMaxTokens(maxContextSize: number | undefined): number {
@@ -2657,72 +2844,6 @@ async function clearLongSourceCheckpoint(checkpointPath: string): Promise<void> 
   }
 }
 
-function extractMarkedSection(raw: string, heading: string): string {
-  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const re = new RegExp(`(?:^|\\n)##\\s+${escaped}\\s*\\n([\\s\\S]*?)(?=\\n##\\s|$)`, "i")
-  return re.exec(raw)?.[1]?.trim() ?? ""
-}
-
-function buildChunkAnalysisSystemPrompt(
-  purpose: string,
-  schema: string,
-  index: string,
-  sourceContent: string,
-): string {
-  return [
-    "You are analyzing a long source document for a personal wiki.",
-    "Do not output chain-of-thought, hidden reasoning, or a thinking transcript.",
-    "Analyze only the current MAIN CHUNK. Use overlap and digest for context only.",
-    "Keep stable names consistent with the existing wiki and prior digest.",
-    "",
-    languageRule(sourceContent),
-    "",
-    "Output exactly two markdown sections:",
-    "",
-    "## Chunk Analysis",
-    "- Concise summary of the main chunk",
-    "- New or updated entities",
-    "- New or updated concepts",
-    "- Any schema-defined page types beyond entity/concept that the main chunk genuinely supports",
-    "- Claims, findings, evidence, contradictions",
-    "- Open questions or research gaps",
-    "",
-    "## Updated Global Digest",
-    "A compact document-level digest that incorporates this chunk and preserves prior cross-chunk context.",
-    "Keep this digest structured under: Summary, Entities, Concepts, Schema-Typed Candidates, Claims, Evidence, Contradictions, Open Questions, Cross-Chunk Relations.",
-    "Use schema-defined types only when the source actually supports them; never invent goals, habits, journal entries, decisions, or similar user-authored records that are not present in the source.",
-    "",
-    "Stable project context follows. It changes rarely and should be treated as background:",
-    purpose ? `## Wiki Purpose\n${purpose}` : "",
-    schema ? `## Wiki Schema\n${schema}` : "",
-    index ? `## Current Wiki Index\n${trimLongText(index, 40_000)}` : "",
-  ].filter(Boolean).join("\n")
-}
-
-function buildChunkAnalysisUserPrompt(
-  sourceIdentity: string,
-  folderContext: string | undefined,
-  chunk: SourceChunk,
-  globalDigest: string,
-): string {
-  return [
-    `Source file: ${sourceIdentity}`,
-    folderContext ? `Folder context: ${folderContext}` : "",
-    `Chunk: ${chunk.index}/${chunk.total}`,
-    chunk.headingPath ? `Heading path: ${chunk.headingPath}` : "",
-    "",
-    "## Current Global Digest",
-    globalDigest || "(No prior digest yet.)",
-    "",
-    chunk.overlapBefore ? "## Previous Overlap Context\n" + chunk.overlapBefore : "",
-    "",
-    "## MAIN CHUNK TO ANALYZE",
-    chunk.main,
-    "",
-    "Return only the two requested sections. Do not repeat overlap-only facts unless the main chunk supports them.",
-  ].filter(Boolean).join("\n")
-}
-
 async function analyzeLongSourceInChunks(
   projectPath: string,
   llmConfig: LlmConfig,
@@ -2731,13 +2852,15 @@ async function analyzeLongSourceInChunks(
   index: string,
   sourceIdentity: string,
   sourceSummarySlug: string,
+  sourceSummaryPath: string,
   folderContext: string | undefined,
   sourceContent: string,
   sourceBudget: number,
   activityId: string,
   signal?: AbortSignal,
+  pipelineLogger?: PipelineLogger,
 ): Promise<LongSourcePlan> {
-  const targetChars = clampNumber(Math.floor(sourceBudget * 0.55), LONG_SOURCE_CHUNK_MIN, LONG_SOURCE_CHUNK_MAX)
+  const targetChars = computeEvidenceExtractionChunkChars(sourceBudget)
   const overlapChars = clampNumber(Math.floor(targetChars * 0.08), 800, 3_000)
   const chunks = splitSourceIntoSemanticChunks(sourceContent, targetChars, overlapChars)
   if (chunks.length <= 1) {
@@ -2745,7 +2868,14 @@ async function analyzeLongSourceInChunks(
   }
 
   const activity = useActivityStore.getState()
-  const systemPrompt = (await resolvePrompt("chunk-analysis-system", { purpose, schema, index, sourceContent })) ?? buildChunkAnalysisSystemPrompt(purpose, schema, index, sourceContent)
+  const systemPrompt = await resolvePrompt("evidence-extraction-system", {
+    purpose,
+    schema,
+    index,
+    sourceContent,
+    today: currentWikiDate(),
+  }, { projectPath })
+  if (!systemPrompt) throw new Error("Evidence extraction prompt not found")
   const sourceHash = hashTextHex(sourceContent)
   const checkpointPath = longSourceCheckpointPath(projectPath, sourceSummarySlug, sourceHash)
   const checkpointParams = {
@@ -2760,6 +2890,10 @@ async function analyzeLongSourceInChunks(
   const checkpoint = await loadLongSourceCheckpoint(checkpointPath, checkpointParams)
   let globalDigest = checkpoint?.globalDigest ?? ""
   const analyses: string[] = checkpoint?.analyses ? [...checkpoint.analyses] : []
+  const chunkLedgers: ChunkEvidenceLedger[] = []
+  for (const saved of analyses) {
+    chunkLedgers.push(parseChunkEvidenceLedger(saved))
+  }
   let completedThrough = checkpoint?.completedThrough ?? 0
 
   if (completedThrough > 0) {
@@ -2776,57 +2910,66 @@ async function analyzeLongSourceInChunks(
     })
 
     let raw = ""
-    let hadError = false
+    let streamError: Error | undefined
+    const trackedCall = pipelineLogger?.createCall(
+      "evidence-extraction",
+      `chunk ${chunk.index}/${chunk.total}`,
+      "evidence-extraction",
+      "builtin",
+      quickHash(systemPrompt),
+      llmConfig.provider,
+      llmConfig.model,
+    )
     await streamChat(
       llmConfig,
       [
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: (await resolvePrompt("chunk-analysis-user", {
+          content: (await resolvePrompt("evidence-extraction-user", {
             purpose,
+            schema,
             sourceIdentity,
-            folderContext: folderContext ?? "",
-            chunkIndex: String(chunk.index),
-            chunkTotal: String(chunk.total),
-            headingPath: chunk.headingPath ?? "",
-            globalDigest: trimLongText(globalDigest, LONG_SOURCE_DIGEST_MAX),
+            chunkMetadataJson: JSON.stringify({
+              index: chunk.index,
+              total: chunk.total,
+              heading_path: chunk.headingPath,
+              folder_context: folderContext ?? "",
+            }),
+            globalDigestJson: trimLongText(globalDigest || "{}", LONG_SOURCE_DIGEST_MAX),
             overlapBefore: chunk.overlapBefore ?? "",
             chunkMain: chunk.main,
-          })) ?? buildChunkAnalysisUserPrompt(
-            sourceIdentity,
-            folderContext,
-            chunk,
-            trimLongText(globalDigest, LONG_SOURCE_DIGEST_MAX),
-          ),
+            evidenceLedgerSchema: JSON.stringify(getEvidenceLedgerSchema()),
+          }, { projectPath })) ?? "",
         },
       ],
       {
-        onToken: (token) => { raw += token },
+        onToken: (token) => { raw += token; trackedCall?.onToken(token) },
         onDone: () => {},
         onError: (err) => {
-          hadError = true
+          streamError = err
           activity.updateItem(activityId, { status: "error", detail: `Chunk analysis failed: ${err.message}` })
         },
       },
       signal,
-      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
+      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: computeIngestAnalysisMaxTokens(llmConfig.maxContextSize) },
     )
 
     throwIfIngestAborted(signal, activityId)
-    if (hadError) throw new Error("Chunk analysis stream failed")
+    if (streamError) {
+      trackedCall?.onComplete(raw.length, Math.ceil(raw.length / 4), false, [], streamError.message)
+      throw new Error(`Chunk analysis stream failed: ${streamError.message}`)
+    }
+    trackedCall?.onComplete(raw.length, Math.ceil(raw.length / 4))
 
-    const chunkAnalysis = extractMarkedSection(raw, "Chunk Analysis") || raw.trim()
-    const nextDigest = extractMarkedSection(raw, "Updated Global Digest")
-    analyses.push([
-      `## Chunk ${chunk.index}/${chunk.total}${chunk.headingPath ? ` — ${chunk.headingPath}` : ""}`,
-      trimLongText(chunkAnalysis, LONG_SOURCE_CHUNK_ANALYSIS_MAX),
-    ].join("\n"))
-
-    globalDigest = trimLongText(
-      nextDigest || [globalDigest, chunkAnalysis].filter(Boolean).join("\n\n"),
-      LONG_SOURCE_DIGEST_MAX,
-    )
+    const chunkLedger = parseChunkEvidenceLedger(raw)
+    chunkLedgers.push(chunkLedger)
+    analyses.push(raw)
+    globalDigest = trimLongText(JSON.stringify({
+      extractedEvidenceIds: chunkLedgers.flatMap((ledger) => ledger.records.map((record) => record.id)),
+      stableSubjects: [...new Set(chunkLedgers.flatMap((ledger) => ledger.records.map((record) => record.subject)))],
+      completedThrough: chunk.index,
+    }), LONG_SOURCE_DIGEST_MAX)
     completedThrough = chunk.index
     await saveLongSourceCheckpoint(checkpointPath, {
       version: 1,
@@ -2838,29 +2981,113 @@ async function analyzeLongSourceInChunks(
     })
   }
 
-  const analysis = [
-    "# Consolidated Long-Document Analysis",
-    "",
-    "## Final Global Digest",
-    globalDigest || "(No digest produced.)",
-    "",
-    "## Per-Chunk Analyses",
-    analyses.join("\n\n"),
-  ].join("\n")
+  const evidenceLedger = consolidateEvidenceLedgers(sourceIdentity, chunkLedgers)
+  const analysis = JSON.stringify(evidenceLedger, null, 2)
 
   const sourceContext = [
     `# Long Source Context: ${sourceIdentity}`,
     "",
-    `The original source was analyzed in ${chunks.length} semantic chunks with paragraph/section boundaries and overlap. Use this consolidated context instead of assuming the raw document ended early.`,
+    `The original source was analyzed in ${chunks.length} semantic chunks. The validated consolidated evidence ledger is in Stage 1 Analysis.`,
     "",
     "## Final Global Digest",
     globalDigest || "(No digest produced.)",
-    "",
-    "## Chunk Analysis Notes",
-    trimLongText(analyses.join("\n\n"), Math.max(sourceBudget, LONG_SOURCE_CHUNK_ANALYSIS_MAX)),
   ].join("\n")
 
-  return { chunked: true, analysis, sourceContext, checkpointPath }
+  const normalizedInput = normalizeEntityCandidates(evidenceLedger)
+  let entityResolution = checkpoint?.entityResolution
+  if (entityResolution && !validateEntityResolution(entityResolution, normalizedInput).valid) {
+    entityResolution = undefined
+  }
+
+  const requestResolution = async (
+    promptName: "entity-resolution" | "entity-resolution-repair",
+    vars: Record<string, string>,
+  ): Promise<string> => {
+    const prompt = await resolvePrompt(promptName, vars, { projectPath })
+    if (!prompt) throw new Error(`Prompt ${promptName} not found`)
+    let raw = ""
+    let hadError = false
+    const stage = promptName === "entity-resolution" ? "entity-resolution" : "entity-resolution-repair"
+    const trackedCall = pipelineLogger?.createCall(
+      stage,
+      promptName === "entity-resolution" ? "resolve durable page portfolio" : "repair entity resolution",
+      promptName,
+      "builtin",
+      quickHash(prompt),
+      llmConfig.provider,
+      llmConfig.model,
+    )
+    await streamChat(
+      llmConfig,
+      [
+        { role: "system", content: prompt },
+        { role: "user", content: "Return the complete corrected entity-resolution JSON only." },
+      ],
+      {
+        onToken: (token) => { raw += token; trackedCall?.onToken(token) },
+        onDone: () => {},
+        onError: (error) => {
+          hadError = true
+          activity.updateItem(activityId, { status: "error", detail: `Entity resolution failed: ${error.message}` })
+        },
+      },
+      signal,
+      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 12_288 },
+    )
+    if (hadError) throw new Error(`${promptName} stream failed`)
+    trackedCall?.onComplete(raw.length, Math.ceil(raw.length / 4))
+    return raw
+  }
+
+  if (!entityResolution) {
+    activity.updateItem(activityId, { detail: "Resolving evidence into a durable 18–25-page portfolio..." })
+    const normalizedCandidatesJson = JSON.stringify(normalizedInput)
+    const rawResolution = await requestResolution("entity-resolution", {
+      sourceIdentity,
+      normalizedCandidatesJson,
+    })
+    try {
+      entityResolution = parseEntityResolution(rawResolution, normalizedInput)
+    } catch (error) {
+      const validationErrors = error instanceof Error ? error.message : String(error)
+      activity.updateItem(activityId, { detail: "Repairing invalid entity resolution..." })
+      const repaired = await requestResolution("entity-resolution-repair", {
+        validationErrors,
+        normalizedCandidatesJson,
+        invalidResolution: rawResolution,
+      })
+      entityResolution = parseEntityResolution(repaired, normalizedInput)
+    }
+  }
+
+  activity.updateItem(activityId, { detail: "Building validated evidence-owned page plan..." })
+  const pagePlan = buildResolvedPagePlan({
+    ledger: evidenceLedger,
+    resolution: entityResolution,
+    sourceSummaryPath,
+  })
+  const coverage = checkPlanCoverage(pagePlan, evidenceLedger)
+  const batches = validateBatchConstraints(pagePlan)
+  const planIssues = [...coverage.issues, ...batches.issues]
+  if (planIssues.length > 0) throw new Error(`Invalid page plan: ${planIssues.join("; ")}`)
+
+  await pipelineLogger?.saveJsonArtifact("normalized-entity-input", normalizedInput)
+  await pipelineLogger?.saveJsonArtifact("entity-resolution", entityResolution)
+  await pipelineLogger?.saveJsonArtifact("page-plan", pagePlan)
+
+  await saveLongSourceCheckpoint(checkpointPath, {
+    version: 1,
+    ...checkpointParams,
+    completedThrough,
+    globalDigest,
+    analyses,
+    normalizedInput,
+    entityResolution,
+    pagePlan,
+    updatedAt: Date.now(),
+  })
+
+  return { chunked: true, analysis, sourceContext, checkpointPath, evidenceLedger, pagePlan }
 }
 
 /**
@@ -2869,9 +3096,9 @@ async function analyzeLongSourceInChunks(
  * Page-merge.ts handles all the sanity-checking and fallback paths;
  * this is just the "stream the LLM" wrapper.
  */
-function buildPageMerger(llmConfig: LlmConfig, purpose: string = ""): MergeFn {
+function buildPageMerger(llmConfig: LlmConfig, purpose: string = "", projectPath?: string): MergeFn {
   return async (existingContent, incomingContent, sourceFileName, signal) => {
-    const systemPrompt = (await resolvePrompt("page-merge", { purpose })) ?? buildPageMergeSystemPrompt()
+    const systemPrompt = (await resolvePrompt("page-merge", { purpose, today: currentWikiDate() }, { projectPath })) ?? buildPageMergeSystemPrompt()
 
     const userMessage = [
       `## Existing version on disk`,

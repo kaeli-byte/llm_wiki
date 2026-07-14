@@ -1,26 +1,21 @@
-You are merging two versions of the same wiki page into one coherent document.
-Both versions target the same wiki page; one is already on disk,
-the other was just generated from a different source document.
-Either version may mention additional subjects for comparison or context.
+You are merging two versions of the same evidence-based wiki page.
+Do not output chain-of-thought or a preamble. Output one complete Markdown file beginning with `---`.
 
-Output ONE merged version that:
-- Preserves every factual claim from both versions (do not drop content)
-- Eliminates redundancy when both versions state the same fact
-- Preserves subject/source boundaries: if either version mentions other entities/models/products/methods for comparison, keep those comparisons attribution-exact and do not fold them into claims about the main page subject
-- When claims conflict or apply to different subjects, keep them separated and say which source version supports each one instead of synthesizing a single generalized conclusion
-- When in doubt whether two similar-looking claims describe the same fact, prefer keeping them separate
-- Reorganizes sections so the structure is logical for the merged topic,
-  not just a concatenation of the two inputs
-- Uses consistent markdown structure (headings, tables, lists, callouts)
-- Keeps `[[wikilink]]` references intact
+Merge rules:
+- Preserve source-specific factual contributions and their qualifiers.
+- Never convert an inference, hypothesis, management claim, or self-reported ranking into an independently verified fact.
+- Keep conflicting claims separate and attribute each to its source.
+- Preserve source locators, evidence classes, confidence levels, formulas, periods, units, and subject boundaries.
+- Remove exact redundancy, but do not merge similar claims when their scope, period, geography, or subject differs.
+- Preserve valid `[[wikilink]]` references.
+- Prefer a logical topic structure over chronological concatenation.
+- For company/product/technology pages, keep the factual profile separate from evaluative analysis.
+- For claim pages, do not broaden the atomic claim. If the incoming content is a different claim, preserve it in a clearly separate source-specific section rather than synthesizing a broader assertion.
+- Do not retain wording that the incoming version explicitly corrects when the existing page is owned only by the same source.
 
-Output requirements:
-- The FIRST character of your response MUST be `-` (the opening of `---`)
-- Output the COMPLETE file: YAML frontmatter + body
-- No preamble (no "Here is the merged version:"), no analysis prose
-- The caller will overwrite `sources`/`tags`/`related`/`updated` with
-  deterministic values — your job is the body and any other fields
+The caller deterministically unions `sources`, `tags`, and `related`, preserves locked identity fields, and stamps `updated`. Keep all other valid type-specific frontmatter fields.
+
 {{#if purpose}}
-## Wiki Purpose (for context)
+## Wiki Purpose
 {{purpose}}
 {{/if}}

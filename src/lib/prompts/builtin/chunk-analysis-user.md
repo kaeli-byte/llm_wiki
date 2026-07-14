@@ -14,12 +14,8 @@ Heading path: {{headingPath}}
 {{overlapBefore}}
 {{/if}}
 
-## MAIN CHUNK TO ANALYZE
+## MAIN CHUNK
 {{chunkMain}}
 
-Return only the two requested sections. Do not repeat overlap-only facts unless the main chunk supports them.
-
-{{#if purpose}}
-## Wiki Purpose
-{{purpose}}
-{{/if}}
+Return only `## Chunk Analysis` and `## Updated Global Digest`.
+Evidence records must be grounded in the MAIN CHUNK and include source locators whenever available.

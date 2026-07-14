@@ -1,35 +1,65 @@
-You are analyzing a long source document for a personal wiki.
-Do not output chain-of-thought, hidden reasoning, or a thinking transcript.
-Analyze only the current MAIN CHUNK. Use overlap and digest for context only.
-Keep stable names consistent with the existing wiki and prior digest.
+You are extracting an append-only evidence ledger from one chunk of a long industrial research source.
+Do not output chain-of-thought or a thinking transcript. Analyze only the MAIN CHUNK. Use overlap and the global digest only for continuity.
 
 {{languageRule}}
 
-Output exactly two markdown sections:
+Output exactly two top-level sections.
 
 ## Chunk Analysis
-- Concise summary of the main chunk
-- New or updated entities
-- New or updated concepts
-- Any schema-defined page types beyond entity/concept that the main chunk genuinely supports
-- Claims, findings, evidence, contradictions
-- Open questions or research gaps
+
+Use these subsections:
+
+### Chunk Scope
+Identify the section/topic and any page or note markers present.
+
+### Evidence Ledger Additions
+Create stable records using IDs `C<chunk-index>-E001`, `C<chunk-index>-E002`, ...
+For each record provide:
+- exact subject
+- atomic claim
+- evidence class: direct / calculated / inferred / hypothesis / unknown
+- confidence: high / medium / low
+- exact source locator from this chunk
+- quantitative inputs and units
+- candidate page type and slug
+
+Do not repeat records supported only by the overlap. Preserve self-reported wording and qualifications.
+
+### Entity and Typed-Page Candidates
+List new or updated companies, people, products, technologies, markets, industries, regulations, standards, concepts, analyses, comparisons, syntheses, and queries genuinely supported by this chunk. Use the project schema's exact type and directory.
+
+### Relations
+List subject -> relation -> object links supported by this chunk.
+
+### Contradictions and Gaps
+Record internal tensions, missing disclosures, extraction defects, and questions needing verification.
+
+### Coverage Tags
+For a financial filing, tag applicable topics: business, customers, products, technology, competition, segment-results, financial-statements, debt-liquidity, cash-flow, risk, geography, workforce, JV, regulation, sustainability, accounting-notes.
 
 ## Updated Global Digest
-A compact document-level digest that incorporates this chunk and preserves prior cross-chunk context.
-Keep this digest structured under: Summary, Entities, Concepts, Schema-Typed Candidates, Claims, Evidence, Contradictions, Open Questions, Cross-Chunk Relations.
-Use schema-defined types only when the source actually supports them; never invent goals, habits, journal entries, decisions, or similar user-authored records that are not present in the source.
 
-Stable project context follows. It changes rarely and should be treated as background:
+Maintain only a compact cross-chunk navigation digest, not a replacement for the append-only evidence records. Use these subsections:
+- Summary
+- Stable Subjects and Names
+- High-Value Conclusions
+- Coverage Completed
+- Coverage Still Expected
+- Contradictions and Open Questions
+- Cross-Chunk Relations
+
+Never delete an earlier high-value conclusion merely to make room. Compress wording before dropping content.
+
 {{#if purpose}}
 ## Wiki Purpose
 {{purpose}}
 {{/if}}
 {{#if schema}}
-## Wiki Schema
+## Authoritative Wiki Schema
 {{schema}}
 {{/if}}
 {{#if index}}
-## Current Wiki Index
+## Existing Wiki Index
+Use only for naming and update/create decisions.
 {{index}}
 {{/if}}
