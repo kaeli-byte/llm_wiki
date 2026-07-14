@@ -110,6 +110,23 @@ describe("ingest quality LLM contracts", () => {
     expect(() => parseChunkEvidenceLedger('{"records":[]}')).toThrow(/Invalid evidence ledger/)
   })
 
+  it("treats null optional evidence fields as absent", () => {
+    const ledger = parseChunkEvidenceLedger(JSON.stringify({
+      source: { identity: "report.pdf", document_type: "annual-report" },
+      chunk: { index: 1, total: 1 },
+      records: [{
+        id: "C1-E001", subject: "Aeroflex", claim: "Revenue increased.",
+        evidence_class: "direct", confidence: "high",
+        source_locator: { label: "p. 4", section: null },
+        candidate_types: ["company"], formula: null, period: null,
+      }],
+      coverage: {},
+    }))
+    expect(ledger.records[0].formula).toBeUndefined()
+    expect(ledger.records[0].period).toBeUndefined()
+    expect(ledger.records[0].sourceLocator.section).toBeUndefined()
+  })
+
   it("rewrites the planned source page and every reference to the canonical source path", () => {
     const plan = parseAndValidatePagePlan(JSON.stringify({
       version: 1, source_identity: "folder/report.pdf",
