@@ -45,3 +45,33 @@ export interface NormalizedEntityInput {
   strategicThemes: NormalizedCandidate[]
   questionGroups: NormalizedQuestionGroup[]
 }
+
+export interface ResolvedPageCandidate {
+  candidateId: string
+  kind: ResolvedPageKind
+  title: string
+  slug: string
+  priority: "critical" | "high" | "medium" | "low"
+  aliases: string[]
+  primaryEvidenceIds: string[]
+  secondaryEvidenceIds: string[]
+  relatedCandidateIds: string[]
+  rationale: string
+}
+
+export interface EntityResolution {
+  version: 1
+  sourceIdentity: string
+  pages: ResolvedPageCandidate[]
+  mergeDecisions: Array<{
+    canonicalCandidateId: string
+    mergedCandidateIds: string[]
+    reason: string
+  }>
+  lowerBoundJustification?: string
+}
+
+export interface ResolutionValidationResult {
+  valid: boolean
+  errors: string[]
+}
