@@ -127,7 +127,8 @@ function hasStructuralPageBody(content: string): boolean {
 
 async function loadRetainedStagedFiles(
   stagingRoot: string,
-  plannedPaths: Set<string>,
+  plannedPages: Map<string, PlannedPage>,
+  knownEvidenceIds: Set<string>,
 ): Promise<Map<string, string>> {
   const retained = new Map<string, string>()
   try {
@@ -137,9 +138,16 @@ async function loadRetainedStagedFiles(
       const fullPath = normalizePath(node.path)
       if (!fullPath.startsWith(prefix)) continue
       const relativePath = fullPath.slice(prefix.length)
-      if (!plannedPaths.has(relativePath)) continue
+      const plannedPage = plannedPages.get(relativePath)
+      if (!plannedPage) continue
       const content = await readFile(fullPath)
-      if (hasStructuralPageBody(content)) retained.set(relativePath, content)
+      if (!hasStructuralPageBody(content)) continue
+      const frontmatter = content.match(/^---\n([\s\S]*?)\n---/)
+      const type = frontmatter?.[1].match(/^type:\s*["']?([^\s"']+)/m)?.[1]
+      if (type !== plannedPage.type) continue
+      const citedIds = content.match(/\bC\d+-E\d+\b/g) ?? []
+      if (citedIds.some((id) => !knownEvidenceIds.has(id))) continue
+      retained.set(relativePath, content)
     }
   } catch {
     // No previous staging tree, or a stale unreadable tree. Generation
@@ -284,7 +292,9 @@ export async function generateWikiPagesInBatches(
   const allGeneratedFiles = new Map<string, string>() // path → content
   const warnings: string[] = []
   const plannedPaths = new Set(ctx.plan.pages.map((page) => page.path))
-  const retainedFiles = await loadRetainedStagedFiles(stagingRoot, plannedPaths)
+  const plannedPages = new Map(ctx.plan.pages.map((page) => [page.path, page]))
+  const knownEvidenceIds = new Set(ctx.evidenceLedger.records.map((record) => record.id))
+  const retainedFiles = await loadRetainedStagedFiles(stagingRoot, plannedPages, knownEvidenceIds)
   const maxOutputTokens = computeIngestGenerationMaxTokens(ctx.llmConfig.maxContextSize)
   for (const [path, content] of retainedFiles) allGeneratedFiles.set(path, content)
 

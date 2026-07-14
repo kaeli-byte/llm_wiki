@@ -224,6 +224,24 @@ describe("generateWikiPagesInBatches completeness", () => {
     expect(result.totalGeneratedPages).toBe(1)
   })
 
+  it("regenerates a staged page that cites evidence absent from the current ledger", async () => {
+    const singlePlan: WikiPagePlan = { ...plan, pages: [plan.pages[1]], batches: [{ id: "batch-001", pagePaths: ["wiki/claims/revenue.md"] }] }
+    listDirectoryMock.mockResolvedValue([{ name: "revenue.md", path: "/project/.llm-wiki/staging/report/wiki/claims/revenue.md", is_dir: false }])
+    readFileMock.mockResolvedValue("---\ntype: claim\ntitle: Revenue\nevidence_type: direct\nsource_pages: p. 9\n---\n## Evidence\nStale [C2-E007; p. 9]")
+    streamChatMock.mockImplementation(async (_cfg, _messages, callbacks) => {
+      callbacks?.onToken("---FILE: wiki/claims/revenue.md---\n---\ntype: claim\ntitle: Revenue\nevidence_type: direct\nsource_pages: p. 4\n---\n## Evidence\nCurrent [C1-E001; p. 4]")
+      callbacks?.onDone()
+    })
+
+    const result = await generateWikiPagesInBatches({
+      projectPath: "/project", sourceSummarySlug: "report", sourceIdentity: "report.pdf",
+      llmConfig: { provider: "openai", model: "test", apiKey: "", ollamaUrl: "", customEndpoint: "", maxContextSize: 128_000 },
+      plan: singlePlan, evidenceLedger, schema: "schema", purpose: "purpose", index: "index", activityId: "activity",
+    })
+    expect(result.success).toBe(true)
+    expect(streamChatMock).toHaveBeenCalledTimes(1)
+  })
+
   it("succeeds when a page-local recovery repairs an earlier failed batch", async () => {
     const singlePlan: WikiPagePlan = {
       ...plan,
