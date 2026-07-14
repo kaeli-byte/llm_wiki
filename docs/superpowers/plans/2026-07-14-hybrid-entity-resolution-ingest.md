@@ -420,13 +420,13 @@ rtk git commit -m "fix: gate ingest completion on verified portfolio"
 - Consumes: `/Users/hafid/Documents/Industry-v2/.llm-wiki/ingest-progress/17-financial-reports--36-aeroflexmobility2025mockannualreport--wb60cn-de27de3ee762d5fd.json`.
 - Produces: real filesystem, cache, queue, manifest, and evidence-ownership proof.
 
-- [ ] **Step 1: Run the complete sandbox-safe test suite**
+- [x] **Step 1: Run the complete sandbox-safe test suite**
 
 Run: `rtk npm run test:mocks`
 
 Expected: all test files and tests pass.
 
-- [ ] **Step 2: Typecheck and build the desktop bundle**
+- [x] **Step 2: Typecheck and build the desktop bundle**
 
 Run: `rtk npm run typecheck`
 
@@ -436,11 +436,11 @@ Run: `rtk npm run tauri -- build --debug --bundles app`
 
 Expected: debug application bundle created successfully.
 
-- [ ] **Step 3: Launch the exact debug bundle and retry Aeroflex**
+- [x] **Step 3: Launch the exact debug bundle and retry Aeroflex**
 
 Launch `/Users/hafid/Documents/llm_wiki/src-tauri/target/debug/bundle/macos/LLM Wiki.app`, retry the pending Aeroflex task, and confirm the log contains entity resolution followed by concurrent single-page synthesis without a page-planning call.
 
-- [ ] **Step 4: Verify the committed portfolio on disk**
+- [x] **Step 4: Verify the committed portfolio on disk**
 
 Inspect the generated paths and assert:
 
@@ -454,15 +454,15 @@ unknown evidence IDs == 0
 duplicate primary owners == 0
 ```
 
-- [ ] **Step 5: Verify cache, queue, checkpoint, and manifest**
+- [x] **Step 5: Verify cache, queue, checkpoint, and manifest**
 
 Confirm queue status is completed, cache paths all exist, the manifest call/page counts match the log and filesystem, quality passed, and the evidence checkpoint is cleared only after successful commit/cache.
 
-- [ ] **Step 6: Update the handover with measured evidence**
+- [x] **Step 6: Update the handover with measured evidence**
 
 Record final page counts by type, wall time, resolver/synthesis call counts, ownership coverage, cache/manifest verification, and the obsolete architecture that was replaced.
 
-- [ ] **Step 7: Run final diff and verification checks**
+- [x] **Step 7: Run final diff and verification checks**
 
 Run: `rtk git diff --check`
 
@@ -472,7 +472,7 @@ Run: `rtk git status --short`
 
 Expected: only intentional implementation and handover changes.
 
-- [ ] **Step 8: Commit verified acceptance evidence**
+- [x] **Step 8: Commit verified acceptance evidence**
 
 ```bash
 rtk git add HANDOVER.md

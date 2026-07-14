@@ -28,37 +28,39 @@ PDF → chunk evidence extraction → consolidated evidence ledger
     → cross-link/citation/ownership validation → transactional commit/cache
 ```
 
-Current real-trial state:
+Verified real-trial result (2026-07-14):
 
 - Project: `/Users/hafid/Documents/Industry-v2`
 - Source: `raw/sources/financial-reports/aeroflex_mobility_2025_mock_annual_report.pdf`
-- Evidence checkpoint: `.llm-wiki/ingest-progress/17-financial-reports--36-aeroflexmobility2025mockannualreport--wb60cn-de27de3ee762d5fd.json`
-- The checkpoint contains all four completed evidence chunks and 117 consolidated evidence records.
-- The last 67-page trial was deliberately stopped because it violated the approved 18–25-page portfolio target.
-- The debug app was stopped; do not retry Aeroflex until Tasks 1–6 are implemented and verified.
-- Existing staged output from aborted trials is not acceptance evidence and must not be committed or cached as success.
+- Final run: `.llm-wiki/runs/financial-reports_aeroflex_mobility_2025-2026-07-14T07-33-14-228Z/`
+- Result: 19 durable planned pages: 1 source, 6 company (1 primary company plus subsidiaries/counterparties), 5 product, 4 analysis, 2 segment/entity, and 1 unresolved-question page.
+- Evidence: 184 consolidated evidence IDs; 184 primary owners; zero missing, duplicate, or unknown primary IDs.
+- Filesystem: all 19 planned paths exist. The manifest verifies 21 written paths including `wiki/index.md` and `wiki/log.md`; none are absent.
+- Quality/cache/queue: semantic quality passed, cache paths match disk, the ingest checkpoint was cleared after cache save, and `ingest-queue.json` is empty.
+- Calls: the final checkpoint resume needed one 3.97-second QA call (85 output tokens), no new resolver call, no page-planning call, and no whole-portfolio regeneration. The originating synthesis run used one resolver call and 14 single-page synthesis calls, including two page-local recoveries, with concurrency of three.
+- Timing: final resume started at `07:33:14Z`, cached by approximately `07:33:24Z`, and finalized at `07:40:43Z` (7m29s total). Roughly 7m19s was sequential post-cache embedding/indexing, now the dominant remaining speed bottleneck.
+- Verification: `npm run test:mocks` passes 120 files / 1675 tests; typecheck passes; the debug `.app` bundle was rebuilt successfully.
 
-Required acceptance evidence from one final Aeroflex run:
+Acceptance evidence achieved:
 
-- 18–25 committed wiki pages and no default standalone claim pages;
-- one source page and one primary company page;
-- supported segment, product/program, strategic-topic, financial, risk, acquisition, counterparty, and unresolved-question pages;
-- all 117 evidence IDs with exactly one primary owner;
-- zero missing planned paths and zero unknown evidence IDs;
-- cache paths equal verified files on disk;
-- queue completed, quality passed, and manifest counts match the pipeline log and filesystem;
-- no large LLM page-planning call and no whole-portfolio regeneration after a page-local failure.
+- [x] 18–25 committed wiki pages and no default standalone claim pages.
+- [x] One source page and one primary company page, plus supported subsidiary/counterparty pages.
+- [x] Supported segment, product/program, strategic-topic, financial, risk, acquisition, counterparty, and unresolved-question pages.
+- [x] All 184 evidence IDs have exactly one primary owner.
+- [x] Zero missing planned paths and zero unknown evidence IDs.
+- [x] Cache paths equal verified files on disk.
+- [x] Queue completed, quality passed, and manifest counts match the pipeline log and filesystem.
+- [x] No large LLM page-planning call and no whole-portfolio regeneration after a page-local failure.
 
-Resume instructions:
+Future optimization / resume instructions:
 
-1. Read the approved design completely.
-2. Execute the implementation roadmap from Task 1 in order using its required implementation skill.
-3. Preserve unrelated dirty-worktree changes and the completed Aeroflex evidence checkpoint.
-4. Run the sandbox-safe suite and build before reopening the debug app.
-5. Perform the final acceptance audit exactly as written in Task 7 before marking the goal complete.
+1. Preserve the verified hybrid architecture and deterministic ownership checks.
+2. Optimize the sequential embedding loop after cache save; use bounded concurrency or move indexing out of the queue-critical completion path, with tests for partial embedding failures.
+3. Keep cache and manifest disk-authoritative and never mark a partial generation as successful.
+4. Re-run the Task 7 audit after any ingestion or embedding change.
 
 **Date:** 2026-07-14
-**Status:** Under active investigation
+**Status:** Hybrid ingest fix verified; sequential post-ingest embedding remains a performance follow-up
 
 ---
 
