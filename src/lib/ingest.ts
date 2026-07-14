@@ -2906,7 +2906,7 @@ async function analyzeLongSourceInChunks(
     })
 
     let raw = ""
-    let hadError = false
+    let streamError: Error | undefined
     const trackedCall = pipelineLogger?.createCall(
       "evidence-extraction",
       `chunk ${chunk.index}/${chunk.total}`,
@@ -2943,7 +2943,7 @@ async function analyzeLongSourceInChunks(
         onToken: (token) => { raw += token; trackedCall?.onToken(token) },
         onDone: () => {},
         onError: (err) => {
-          hadError = true
+          streamError = err
           activity.updateItem(activityId, { status: "error", detail: `Chunk analysis failed: ${err.message}` })
         },
       },
@@ -2952,7 +2952,10 @@ async function analyzeLongSourceInChunks(
     )
 
     throwIfIngestAborted(signal, activityId)
-    if (hadError) throw new Error("Chunk analysis stream failed")
+    if (streamError) {
+      trackedCall?.onComplete(raw.length, Math.ceil(raw.length / 4), false, [], streamError.message)
+      throw new Error(`Chunk analysis stream failed: ${streamError.message}`)
+    }
     trackedCall?.onComplete(raw.length, Math.ceil(raw.length / 4))
 
     const chunkLedger = parseChunkEvidenceLedger(raw)
