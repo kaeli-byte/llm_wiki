@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { parseQualityReviewResult, selectSemanticReviewPlan } from "./quality-review"
 import type { WikiPagePlan } from "./ingest-quality-types"
+import { readFileSync } from "node:fs"
 
 describe("quality review contract", () => {
   it("normalizes the prompt-facing snake_case result", () => {
@@ -48,5 +49,13 @@ describe("quality review contract", () => {
       "wiki/analyses/financials.md",
       "wiki/products/flexwing.md",
     ])
+  })
+
+  it("defines a scoped durable-page QA contract without requiring claim pages", () => {
+    const prompt = readFileSync(new URL("./prompts/builtin/quality-review.md", import.meta.url), "utf8")
+    expect(prompt).toContain("intentionally scoped")
+    expect(prompt).toContain("durable subject pages")
+    expect(prompt).not.toContain("Every claim page")
+    expect(prompt).not.toContain("linked to a claim page")
   })
 })
